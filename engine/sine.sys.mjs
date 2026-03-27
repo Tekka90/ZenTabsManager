@@ -5,10 +5,15 @@
  * and integrates with Zen Browser's UI and systems.
  */
 
+// Debug: Log that this file is being loaded
+console.log("[ZenTabs] sine.sys.mjs is loading...");
+
 // Export mods array FIRST to ensure it exists even if initialization fails
 export const mods = [];
 
+console.log("[ZenTabs] About to import ZenTabsAPI...");
 import { ZenTabsAPI } from "./sine.api.mjs";
+console.log("[ZenTabs] ZenTabsAPI imported successfully");
 
 class ZenTabsManager {
   constructor() {
@@ -345,20 +350,34 @@ class ZenTabsManager {
 }
 
 // Create singleton instance
-const manager = new ZenTabsManager();
+console.log("[ZenTabs] Creating ZenTabsManager instance...");
+let manager;
+try {
+  manager = new ZenTabsManager();
+  console.log("[ZenTabs] Manager instance created successfully");
+} catch (error) {
+  console.error("[ZenTabs] Failed to create manager instance:", error);
+  throw error;
+}
 
 // Populate the mods array (exported at top of file)
+console.log("[ZenTabs] Populating mods array...");
 mods.push({
   id: "zentabs-manager",
   name: "ZenTabs Manager",
   version: "1.0.0",
-  init: () => manager.init(),
+  init: () => {
+    console.log("[ZenTabs] Sine called init()");
+    return manager.init();
+  },
   shutdown: () => manager.shutdown(),
   instance: manager
 });
+console.log("[ZenTabs] Mods array populated, length:", mods.length);
 
 // Auto-initialize if Sine doesn't call init (fallback)
 setTimeout(() => {
+  console.log("[ZenTabs] Fallback timer triggered, initialized:", manager.initialized);
   if (!manager.initialized) {
     console.log("[ZenTabs] Auto-initializing (Sine didn't call init)");
     if (document.readyState === "loading") {
@@ -372,3 +391,5 @@ setTimeout(() => {
 // Also export for direct access
 export default manager;
 export { ZenTabsManager };
+
+console.log("[ZenTabs] sine.sys.mjs fully loaded and exported");
