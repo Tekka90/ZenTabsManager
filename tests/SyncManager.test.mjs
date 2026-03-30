@@ -440,6 +440,32 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     assert.ok(!tab.hasAttribute("zen-workspace-id"), "essential tabs have no workspace-id");
   });
 
+  test("Essentials subfolder → tab gets usercontextid from space containerTabId", async () => {
+    const ws = { ...makeWorkspace("Personal", "uuid-personal"), containerTabId: 5 };
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://essential.com", "Essential", "Essentials");
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const tab = mgr.window.gBrowser.tabs[0];
+    assert.equal(tab.getAttribute("usercontextid"), "5", "essential tab should carry space containerTabId as userContextId");
+  });
+
+  test("Essentials subfolder → tab has no usercontextid when containerTabId is 0", async () => {
+    const ws = makeWorkspace("Personal", "uuid-personal"); // containerTabId: 0
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://essential.com", "Essential", "Essentials");
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const tab = mgr.window.gBrowser.tabs[0];
+    assert.ok(!tab.hasAttribute("usercontextid"), "should not set usercontextid when containerTabId is 0");
+  });
+
   test("bookmark in space root → tab is pinned", async () => {
     const ws = makeWorkspace("Personal", "uuid-personal");
     const mgr = makeManager({ workspaces: [ws], tabs: [] });
@@ -470,6 +496,61 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     assert.equal(folders[0].workspaceId, ws.uuid);
     assert.equal(folders[0].tabs.length, 1);
     assert.equal(folders[0].tabs[0].pinned, true, "createFolder pins its tabs");
+  });
+
+  test("nested bookmark subfolders → all URLs collected into single Zen folder (regression: nested items were silently skipped)", async () => {
+    // Regression: _openRestoredFolder previously did `if (!bm.uri) continue`
+    // which skipped nested subfolders, leaving createdTabs empty and no
+    // Zen folder created.  URLs must now be collected recursively.
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    // Seed: Zen/Personal/Work/React/https://react.com
+    //                              /https://vue.com
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenFolder   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid,    type: "folder",   title: "Zen" });
+    const spaceFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid, type: "folder",   title: "Personal" });
+    const workFolder  = await PlacesUtils.bookmarks.insert({ parentGuid: spaceFolder.guid, type: "folder", title: "Work" });
+    const reactFolder = await PlacesUtils.bookmarks.insert({ parentGuid: workFolder.guid,  type: "folder", title: "React" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: reactFolder.guid, type: "bookmark", title: "React",  url: "https://react.com" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: reactFolder.guid, type: "bookmark", title: "Vue",    url: "https://vue.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const folders = mgr.window.gZenFolders._createdFolders;
+    assert.equal(folders.length, 1, "one Zen folder should be created for the outer 'Work' folder");
+    assert.equal(folders[0].label, "Work");
+    assert.equal(folders[0].tabs.length, 2, "both nested bookmarks should be collected");
+    const tabUrls = folders[0].tabs.map(t => t.linkedBrowser.currentURI.spec);
+    assert.ok(tabUrls.includes("https://react.com"), "React URL present");
+    assert.ok(tabUrls.includes("https://vue.com"),   "Vue URL present");
+  });
+
+  test("named folder with no direct bookmarks (only nested subfolders) → still creates Zen folder", async () => {
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    // Outer folder has NO direct bookmarks, only a nested subfolder
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenFolder   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid,      type: "folder", title: "Zen" });
+    const spaceFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid,   type: "folder", title: "Personal" });
+    const outerFolder = await PlacesUtils.bookmarks.insert({ parentGuid: spaceFolder.guid, type: "folder", title: "Outer" });
+    const innerFolder = await PlacesUtils.bookmarks.insert({ parentGuid: outerFolder.guid,  type: "folder", title: "Inner" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: innerFolder.guid, type: "bookmark", title: "Site", url: "https://site.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const folders = mgr.window.gZenFolders._createdFolders;
+    assert.equal(folders.length, 1, "should create exactly one Zen folder");
+    assert.equal(folders[0].label, "Outer");
+    assert.equal(folders[0].tabs.length, 1);
+    assert.equal(folders[0].tabs[0].linkedBrowser.currentURI.spec, "https://site.com");
   });
 
   test("fresh install — no spaces — creates the space and opens tabs", async () => {

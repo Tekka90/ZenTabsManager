@@ -162,6 +162,7 @@ export function makeGBrowser(tabs = []) {
     get tabs() { return openTabs; },
     addTab(url, opts) {
       const tab = makeTab({ url, lastAccessed: Date.now() });
+      if (opts?.userContextId !== undefined) tab.setAttribute("usercontextid", String(opts.userContextId));
       openTabs.push(tab);
       return tab;
     },
