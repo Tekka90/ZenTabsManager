@@ -209,6 +209,24 @@ export function makeGZenWorkspaces(workspaces = [], allTabs = []) {
   };
 }
 
+// ── Zen Folders (gZenFolders) ───────────────────────────────────────────────
+
+export function makeGZenFolders() {
+  const createdFolders = [];
+  return {
+    createFolder(tabs, options = {}) {
+      // Mirror real behaviour: pin all non-essential tabs
+      for (const tab of tabs) {
+        tab.pinned = true;
+      }
+      const entry = { label: options.label, workspaceId: options.workspaceId, tabs: [...tabs] };
+      createdFolders.push(entry);
+      return entry;
+    },
+    _createdFolders: createdFolders,
+  };
+}
+
 // ── Manager stub (central coordinator) ────────────────────────────────────
 
 /**
@@ -225,6 +243,7 @@ export function makeManager({
   const PlacesUtils = makePlacesUtils();
   const gBrowser    = makeGBrowser(tabs);
   const gZenWorkspaces = makeGZenWorkspaces(workspaces, tabs);
+  const gZenFolders    = makeGZenFolders();
 
   // Expose Services as a global for modules that reference it directly
   // (SyncManager calls Services.prefs and Services.scriptSecurityManager)
@@ -259,6 +278,7 @@ export function makeManager({
       PlacesUtils,
       gBrowser,
       gZenWorkspaces,
+      gZenFolders,
       Services,
       setInterval:   (fn, ms) => null,
       clearInterval: () => {},

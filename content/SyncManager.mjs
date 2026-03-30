@@ -403,15 +403,21 @@ export class SyncManager {
           result.bookmarksFound++;
           await this._openRestoredTab(child.uri, spaceUuid, "pinned", existingUrls, result);
         } else if (child.uri == null && child.children !== undefined) {
-          // Sub-folder — infer type from its well-known name
-          const tabType =
-            child.title === "Essentials"     ? "essential" :
-            child.title === "Temporary tabs" ? "normal"    :
-            "pinned"; // any other named folder = pinned tab's Zen folder
-          const bms = await this.getAllBookmarksInFolder(child.guid);
-          result.bookmarksFound += bms.length;
-          for (const bm of bms) {
-            await this._openRestoredTab(bm.url, spaceUuid, tabType, existingUrls, result);
+          if (child.title === "Essentials") {
+            const bms = await this.getAllBookmarksInFolder(child.guid);
+            result.bookmarksFound += bms.length;
+            for (const bm of bms) {
+              await this._openRestoredTab(bm.url, spaceUuid, "essential", existingUrls, result);
+            }
+          } else if (child.title === "Temporary tabs") {
+            const bms = await this.getAllBookmarksInFolder(child.guid);
+            result.bookmarksFound += bms.length;
+            for (const bm of bms) {
+              await this._openRestoredTab(bm.url, spaceUuid, "normal", existingUrls, result);
+            }
+          } else {
+            // Named folder = pinned tab group with a Zen folder
+            await this._openRestoredFolder(child, spaceUuid, existingUrls, result);
           }
         }
       }
@@ -450,6 +456,58 @@ export class SyncManager {
     } catch (e) {
       console.error(`[ZenTabs] Error opening tab for ${url}:`, e);
       result.errors++;
+    }
+  }
+
+  /**
+   * Restore a named bookmark subfolder as a Zen folder (pinned tab group).
+   * Uses gZenFolders.createFolder() which handles pinning and folder DOM creation.
+   */
+  async _openRestoredFolder(folderChild, spaceUuid, existingUrls, result) {
+    const { gBrowser } = this.manager.window;
+    const gZenFolders = this.manager.window.gZenFolders;
+    if (!gZenFolders) {
+      // Fallback: restore as individual pinned tabs
+      const bms = await this.getAllBookmarksInFolder(folderChild.guid);
+      result.bookmarksFound += bms.length;
+      for (const bm of bms) {
+        await this._openRestoredTab(bm.url, spaceUuid, "pinned", existingUrls, result);
+      }
+      return;
+    }
+
+    const createdTabs = [];
+    for (const bm of (folderChild.children || [])) {
+      if (!bm.uri) continue; // skip any nested structure
+      result.bookmarksFound++;
+      if (existingUrls.has(bm.uri)) { result.tabsExisting++; continue; }
+      try {
+        const tab = gBrowser.addTab(bm.uri, {
+          inBackground: true,
+          triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
+        });
+        if (!tab) { result.errors++; continue; }
+        tab.setAttribute("zen-workspace-id", spaceUuid);
+        createdTabs.push(tab);
+        existingUrls.add(bm.uri);
+      } catch (e) {
+        console.error(`[ZenTabs] Error opening tab for ${bm.uri}:`, e);
+        result.errors++;
+      }
+    }
+
+    if (createdTabs.length > 0) {
+      try {
+        gZenFolders.createFolder(createdTabs, {
+          label: folderChild.title,
+          workspaceId: spaceUuid,
+        });
+        result.tabsCreated += createdTabs.length;
+      } catch (e) {
+        console.error(`[ZenTabs] Error creating folder "${folderChild.title}":`, e);
+        for (const tab of createdTabs) { gBrowser.pinTab(tab); }
+        result.tabsCreated += createdTabs.length;
+      }
     }
   }
 
