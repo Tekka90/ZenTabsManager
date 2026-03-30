@@ -107,24 +107,28 @@ export class TabManager {
   }
 
   /**
-   * Get workspace information
+   * Get workspace (Space) information
+   * Zen calls these "Spaces" in the UI but "workspaces" in code.
+   * Space object shape: { uuid, name, icon, theme, containerTabId }
    */
   getWorkspaceInfo(tab) {
     if (typeof this.manager.window.gZenWorkspaces !== "undefined") {
       const workspaceId = tab.getAttribute("zen-workspace-id");
       if (workspaceId) {
         try {
-          const workspace = this.manager.window.gZenWorkspaces.getWorkspaceById(workspaceId);
+          const workspace = this.manager.window.gZenWorkspaces.getWorkspaceFromId(workspaceId);
           return {
             id: workspaceId,
-            name: workspace ? workspace.name : workspaceId
+            name: workspace?.name ?? workspaceId,
+            icon: workspace?.icon ?? null,
+            containerTabId: workspace?.containerTabId ?? 0
           };
         } catch (e) {
-          return { id: workspaceId, name: workspaceId };
+          return { id: workspaceId, name: workspaceId, icon: null, containerTabId: 0 };
         }
       }
     }
-    return { id: "default", name: "default" };
+    return { id: "default", name: "default", icon: null, containerTabId: 0 };
   }
 
   /**
@@ -253,14 +257,16 @@ export class TabManager {
         normal: 0
       },
       byState: {},
+      bySpace: {}, // { [spaceName]: { id, icon, total, essential, pinned, normal } }
       inFolders: 0,
-      workspaces: new Set(),
+      spaces: 0,
       folders: new Set(),
       oldestTab: null,
       newestTab: null,
       memorySavings: 0
     };
     
+    const spaceMap = new Map(); // spaceId -> accumulator
     let oldestDate = Date.now();
     let newestDate = 0;
     
@@ -279,8 +285,14 @@ export class TabManager {
         tabData.folderPath.forEach(f => stats.folders.add(f));
       }
       
-      // Count workspaces
-      stats.workspaces.add(tabData.workspace.name);
+      // Per-space breakdown
+      const { id: spaceId, name: spaceName, icon: spaceIcon } = tabData.workspace;
+      if (!spaceMap.has(spaceId)) {
+        spaceMap.set(spaceId, { id: spaceId, name: spaceName, icon: spaceIcon, total: 0, essential: 0, pinned: 0, normal: 0 });
+      }
+      const spaceStat = spaceMap.get(spaceId);
+      spaceStat.total++;
+      spaceStat[tabData.type]++;
       
       // Track oldest/newest
       const created = tabData.tab.createdAt || tabData.tab.lastAccessed;
@@ -299,8 +311,11 @@ export class TabManager {
       }
     }
     
-    stats.workspaces = stats.workspaces.size;
+    stats.spaces = spaceMap.size;
     stats.folders = stats.folders.size;
+    for (const [, data] of spaceMap) {
+      stats.bySpace[data.name] = { id: data.id, icon: data.icon, total: data.total, essential: data.essential, pinned: data.pinned, normal: data.normal };
+    }
     
     return stats;
   }

@@ -150,7 +150,8 @@ export class SyncManager {
   }
 
   /**
-   * Sync tabs to bookmarks
+   * Sync tabs to bookmarks, organized per Space.
+   * Bookmark structure: Zen/<SpaceName>/Essentials/, Zen/<SpaceName>/<FolderPath>/, Zen/<SpaceName>/Normal/
    */
   async syncToBookmarks(options = {}) {
     const opts = {
@@ -159,14 +160,15 @@ export class SyncManager {
       includeNormal: false,
       ...options
     };
-    
-    this.log("Syncing tabs to bookmarks...");
-    
-    const toolbarGuid = this.manager.window.PlacesUtils.bookmarks.toolbarGuid;
+
+    this.log("Syncing tabs to bookmarks (space-aware)...");
+
+    const PlacesUtils = this.manager.window.PlacesUtils;
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
     const zenFolderGuid = await this.getOrCreateFolder(toolbarGuid, "Zen");
-    const essentialsFolderGuid = await this.getOrCreateFolder(zenFolderGuid, "Essentials");
-    
-    const tabs = await this.manager.tabManager.getAllTabs();
+    const gZenWorkspaces = this.manager.window.gZenWorkspaces;
+
+    const allTabs = await this.manager.tabManager.getAllTabs();
     const result = {
       essentialCount: 0,
       pinnedCount: 0,
@@ -174,25 +176,60 @@ export class SyncManager {
       foldersCreated: 0,
       bookmarksCreated: 0,
       bookmarksUpdated: 0,
-      skipped: 0
+      skipped: 0,
+      bySpace: {}
     };
-    
-    const folderStructure = new Map();
-    const essentialTabs = [];
-    const pinnedTabs = [];
-    const normalTabs = [];
-    
-    // Collect tabs
-    for (const tabData of tabs) {
+
+    // Group tabs by space (uuid -> { space, tabs[] })
+    const tabsBySpace = new Map();
+
+    if (gZenWorkspaces) {
+      for (const workspace of gZenWorkspaces.getWorkspaces()) {
+        tabsBySpace.set(workspace.uuid, { space: workspace, tabs: [] });
+      }
+    }
+
+    for (const tabData of allTabs) {
       if (tabData.url.startsWith("about:") || tabData.url.startsWith("chrome://")) {
         result.skipped++;
         continue;
       }
-      
-      if (tabData.type === "essential" && opts.includeEssential) {
-        essentialTabs.push(tabData);
-        result.essentialCount++;
-      } else if (tabData.type === "pinned" && opts.includePinned) {
+      const spaceId = tabData.workspace.id;
+      if (!tabsBySpace.has(spaceId)) {
+        tabsBySpace.set(spaceId, {
+          space: { uuid: spaceId, name: tabData.workspace.name || "Other" },
+          tabs: []
+        });
+      }
+      tabsBySpace.get(spaceId).tabs.push(tabData);
+    }
+
+    // Sync each space into Zen/<SpaceName>/
+    for (const [spaceId, { space, tabs }] of tabsBySpace) {
+      if (tabs.length === 0) continue;
+
+      const spaceFolderGuid = await this.getOrCreateFolder(zenFolderGuid, space.name);
+      const spaceResult = { essential: 0, pinned: 0, normal: 0 };
+
+      const essentialTabs = tabs.filter(t => t.type === "essential" && opts.includeEssential);
+      const pinnedTabs    = tabs.filter(t => t.type === "pinned"    && opts.includePinned);
+      const normalTabs    = tabs.filter(t => t.type === "normal"    && opts.includeNormal);
+
+      // Essential tabs -> Zen/<Space>/Essentials/
+      if (essentialTabs.length > 0) {
+        const essentialsFolderGuid = await this.getOrCreateFolder(spaceFolderGuid, "Essentials");
+        for (const tabData of essentialTabs) {
+          const created = await this.createOrUpdateBookmark(essentialsFolderGuid, tabData.title, tabData.url);
+          if (created) result.bookmarksCreated++; else result.bookmarksUpdated++;
+          result.essentialCount++;
+          spaceResult.essential++;
+        }
+      }
+
+      // Pinned tabs — preserve Zen folder hierarchy under Zen/<Space>/
+      const folderStructure = new Map();
+      const pinnedNoFolder = [];
+      for (const tabData of pinnedTabs) {
         if (tabData.folderPath) {
           const pathKey = tabData.folderPath.join('/');
           if (!folderStructure.has(pathKey)) {
@@ -200,120 +237,125 @@ export class SyncManager {
           }
           folderStructure.get(pathKey).tabs.push(tabData);
         } else {
-          pinnedTabs.push(tabData);
+          pinnedNoFolder.push(tabData);
         }
+      }
+
+      const folderGuidCache = new Map();
+      for (const folder of [...folderStructure.values()].sort((a, b) => a.path.length - b.path.length)) {
+        let currentParentGuid = spaceFolderGuid;
+        for (let i = 0; i < folder.path.length; i++) {
+          const folderName = folder.path[i];
+          const pathKey = folder.path.slice(0, i + 1).join('/');
+          if (folderGuidCache.has(pathKey)) {
+            currentParentGuid = folderGuidCache.get(pathKey);
+          } else {
+            const guid = await this.getOrCreateFolder(currentParentGuid, folderName);
+            folderGuidCache.set(pathKey, guid);
+            currentParentGuid = guid;
+            result.foldersCreated++;
+          }
+        }
+        for (const tabData of folder.tabs) {
+          const created = await this.createOrUpdateBookmark(currentParentGuid, tabData.title, tabData.url);
+          if (created) result.bookmarksCreated++; else result.bookmarksUpdated++;
+          result.pinnedCount++;
+          spaceResult.pinned++;
+        }
+      }
+
+      for (const tabData of pinnedNoFolder) {
+        const created = await this.createOrUpdateBookmark(spaceFolderGuid, tabData.title, tabData.url);
+        if (created) result.bookmarksCreated++; else result.bookmarksUpdated++;
         result.pinnedCount++;
-      } else if (tabData.type === "normal" && opts.includeNormal) {
-        normalTabs.push(tabData);
-        result.normalCount++;
+        spaceResult.pinned++;
       }
-    }
-    
-    // Create Essential bookmarks
-    for (const tabData of essentialTabs) {
-      const created = await this.createOrUpdateBookmark(essentialsFolderGuid, tabData.title, tabData.url);
-      if (created) result.bookmarksCreated++;
-      else result.bookmarksUpdated++;
-    }
-    
-    // Create folder structure with pinned tabs
-    const sortedFolders = Array.from(folderStructure.values()).sort((a, b) => a.path.length - b.path.length);
-    const folderGuidCache = new Map();
-    
-    for (const folder of sortedFolders) {
-      let currentParentGuid = zenFolderGuid;
-      
-      for (let i = 0; i < folder.path.length; i++) {
-        const folderName = folder.path[i];
-        const pathKey = folder.path.slice(0, i + 1).join('/');
-        
-        if (folderGuidCache.has(pathKey)) {
-          currentParentGuid =folderGuidCache.get(pathKey);
-        } else {
-          const guid = await this.getOrCreateFolder(currentParentGuid, folderName);
-          folderGuidCache.set(pathKey, guid);
-          currentParentGuid = guid;
-          result.foldersCreated++;
+
+      // Normal tabs -> Zen/<Space>/Normal/
+      if (normalTabs.length > 0) {
+        const normalFolderGuid = await this.getOrCreateFolder(spaceFolderGuid, "Normal");
+        for (const tabData of normalTabs) {
+          const created = await this.createOrUpdateBookmark(normalFolderGuid, tabData.title, tabData.url);
+          if (created) result.bookmarksCreated++; else result.bookmarksUpdated++;
+          result.normalCount++;
+          spaceResult.normal++;
         }
       }
-      
-      for (const tabData of folder.tabs) {
-        const created = await this.createOrUpdateBookmark(currentParentGuid, tabData.title, tabData.url);
-        if (created) result.bookmarksCreated++;
-        else result.bookmarksUpdated++;
-      }
+
+      result.bySpace[space.name] = spaceResult;
     }
-    
-    // Create pinned tabs not in folders
-    if (pinnedTabs.length > 0) {
-      const pinnedFolderGuid = await this.getOrCreateFolder(zenFolderGuid, "Pinned");
-      for (const tabData of pinnedTabs) {
-        const created = await this.createOrUpdateBookmark(pinnedFolderGuid, tabData.title, tabData.url);
-        if (created) result.bookmarksCreated++;
-        else result.bookmarksUpdated++;
-      }
-    }
-    
-    // Create normal tabs folder if needed
-    if (normalTabs.length > 0) {
-      const normalFolderGuid = await this.getOrCreateFolder(zenFolderGuid, "Normal");
-      for (const tabData of normalTabs) {
-        const created = await this.createOrUpdateBookmark(normalFolderGuid, tabData.title, tabData.url);
-        if (created) result.bookmarksCreated++;
-        else result.bookmarksUpdated++;
-      }
-    }
-    
+
     await this.rebuildBookmarkCache();
-    
     return result;
   }
 
   /**
-   * Sync bookmarks to tabs
+   * Sync bookmarks to tabs, space-aware.
+   * Reads Zen/<SpaceName>/ subfolders and opens bookmarks into the matching Space.
    */
   async syncFromBookmarks(folderPath = "Zen") {
-    this.log("Syncing bookmarks to tabs...");
-    
-    const toolbarGuid = this.manager.window.PlacesUtils.bookmarks.toolbarGuid;
+    this.log("Syncing bookmarks to tabs (space-aware)...");
+
+    const PlacesUtils = this.manager.window.PlacesUtils;
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
     const zenFolderGuid = await this.getOrCreateFolder(toolbarGuid, "Zen");
-    
-    const bookmarks = await this.getAllBookmarksInFolder(zenFolderGuid);
-    
+    const gZenWorkspaces = this.manager.window.gZenWorkspaces;
+
     const result = {
-      bookmarksFound: bookmarks.length,
+      bookmarksFound: 0,
       tabsCreated: 0,
       tabsExisting: 0,
       errors: 0
     };
-    
-    // Get current tab URLs
+
+    // Build space name -> uuid map
+    const spaceByName = new Map();
+    if (gZenWorkspaces) {
+      for (const workspace of gZenWorkspaces.getWorkspaces()) {
+        spaceByName.set(workspace.name, workspace.uuid);
+      }
+    }
+
+    // Get current tab URLs to avoid duplicates
     const existingUrls = new Set();
-    const tabs = await this.manager.tabManager.getAllTabs();
-    for (const tabData of tabs) {
+    for (const tabData of await this.manager.tabManager.getAllTabs()) {
       existingUrls.add(tabData.url);
     }
-    
-    // Open bookmarks that don't have tabs
-    for (const bm of bookmarks) {
-      if (!bm.url || existingUrls.has(bm.url)) {
-        result.tabsExisting++;
-        continue;
-      }
-      
-      try {
-        // Open tab in background
-        this.manager.window.gBrowser.addTab(bm.url, {
-          inBackground: true,
-          triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
-        });
-        result.tabsCreated++;
-      } catch (error) {
-        console.error(`Error opening tab for ${bm.url}:`, error);
-        result.errors++;
+
+    // Walk Zen/<SpaceName>/ subfolders
+    const zenTree = await PlacesUtils.promiseBookmarksTree(zenFolderGuid, { includeItemIds: false });
+    if (!zenTree || !zenTree.children) return result;
+
+    for (const spaceFolder of zenTree.children) {
+      if (spaceFolder.type !== PlacesUtils.bookmarks.TYPE_FOLDER) continue;
+
+      const spaceUuid = spaceByName.get(spaceFolder.title) || null;
+      const bookmarks = await this.getAllBookmarksInFolder(spaceFolder.guid);
+      result.bookmarksFound += bookmarks.length;
+
+      for (const bm of bookmarks) {
+        if (!bm.url || existingUrls.has(bm.url)) {
+          result.tabsExisting++;
+          continue;
+        }
+        try {
+          const tab = this.manager.window.gBrowser.addTab(bm.url, {
+            inBackground: true,
+            triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
+          });
+          // Assign to the correct Space
+          if (spaceUuid && tab) {
+            tab.setAttribute("zen-workspace-id", spaceUuid);
+          }
+          result.tabsCreated++;
+          existingUrls.add(bm.url);
+        } catch (error) {
+          console.error(`Error opening tab for ${bm.url}:`, error);
+          result.errors++;
+        }
       }
     }
-    
+
     return result;
   }
 
