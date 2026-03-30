@@ -30,12 +30,15 @@ export class TabManager {
    */
   async rebuildCache() {
     this.tabMetadataCache.clear();
-    const tabs = this.manager.window.gBrowser.tabs;
-    
+    const win = this.manager.window;
+    // allStoredTabs covers all spaces; fall back to gBrowser.tabs before Zen initializes
+    const tabs = win.gZenWorkspaces?.allStoredTabs ?? win.gBrowser.tabs;
+
     for (const tab of tabs) {
+      if (tab.hasAttribute("zen-empty-tab")) continue;
       this.cacheTabMetadata(tab);
     }
-    
+
     this.log(`Cache rebuilt with ${this.tabMetadataCache.size} tabs`);
   }
 
@@ -176,20 +179,25 @@ export class TabManager {
   }
 
   /**
-   * Get all tabs with full metadata
+   * Get all tabs with full metadata.
+   * IMPORTANT: In Zen Browser, gBrowser.tabs only returns tabs from the ACTIVE
+   * space. To get tabs across all spaces, use gZenWorkspaces.allStoredTabs.
    */
   async getAllTabs() {
-    const tabs = this.manager.window.gBrowser.tabs;
+    const win = this.manager.window;
+    // Use allStoredTabs when available — it covers tabs from all Spaces.
+    const tabs = (win.gZenWorkspaces?.allStoredTabs) ?? win.gBrowser.tabs;
     const result = [];
-    
+
     for (const tab of tabs) {
+      if (tab.hasAttribute("zen-empty-tab")) continue;
       let metadata = this.tabMetadataCache.get(tab);
       if (!metadata) {
         metadata = this.cacheTabMetadata(tab);
       }
       result.push(metadata);
     }
-    
+
     return result;
   }
 

@@ -109,6 +109,11 @@ Zen calls this feature **Spaces** in the UI, but the internal code uses the term
 
 **Important**: DO NOT use `getWorkspaceById()` — it does not exist. The correct method is `getWorkspaceFromId(uuid)`.
 
+**Critical — `gBrowser.tabs` only returns the active Space's tabs**: Zen physically moves tabs into per-space `<zen-workspace>` DOM containers inside `#tabbrowser-arrowscrollbox`. As a result, `gBrowser.tabs` only returns tabs from the currently active Space. To get tabs across **all** Spaces, always use `gZenWorkspaces.allStoredTabs` (falls back gracefully to `gBrowser.tabs` before Zen initializes). Example:
+```javascript
+const tabs = window.gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
+```
+
 **Per-space bookmarks**: `window.ZenWorkspaceBookmarksStorage` manages a SQLite table `zen_bookmarks_workspaces(bookmark_guid, workspace_uuid)` that associates bookmarks with specific spaces. Use `getBookmarkWorkspaces(guid)` and `getBookmarkGuidsByWorkspace()` to query it.
 
 ### Tab Classification

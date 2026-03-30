@@ -193,7 +193,8 @@ export class UIManager {
   }
 
   async cleanupOldTabs() {
-    const confirmed = confirm(`Clean up tabs older than ${this.manager.preferences.cleanupAge} days?`);
+    const msg = `Clean up tabs older than ${this.manager.preferences.cleanupAge} days?`;
+    const confirmed = this.manager.window.Services.prompt.confirm(null, "ZenTabs Manager", msg);
     if (!confirmed) return;
     
     console.log("🧹 Cleaning up old tabs...");
@@ -260,38 +261,117 @@ export class UIManager {
   }
 
   openSettings() {
-    // Create a simple settings dialog
-    const dialog = `
-      <dialog id="zentabs-settings-dialog" style="padding: 20px; min-width: 500px;">
-        <h2>ZenTabs Manager Settings</h2>
-        <p>Open about:config and search for "zentabs" to configure preferences.</p>
-        <p>Or edit preferences in localStorage:</p>
-        <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow: auto;">
-${JSON.stringify(this.manager.getPreferences(), null, 2)}
-        </pre>
-        <div style="margin-top: 20px; text-align: right;">
-          <button onclick="this.manager.window.document.getElementById('zentabs-settings-dialog').close()">Close</button>
-        </div>
-      </dialog>
-    `;
-    
-    // Insert and show dialog
-    const container = this.manager.window.document.createElement("div");
-    container.innerHTML = dialog;
-    this.manager.window.document.body.appendChild(container);
-    this.manager.window.document.getElementById("zentabs-settings-dialog").showModal();
+    const doc = this.manager.window.document;
+
+    // Remove any existing dialog
+    doc.getElementById("zentabs-settings-dialog")?.remove();
+
+    const prefs = this.manager.getPreferences();
+
+    const fields = [
+      { key: "syncEnabled",           label: "Enable bookmark sync",          type: "checkbox" },
+      { key: "syncDirection",          label: "Sync direction",                type: "select",   options: ["tabs-to-bookmarks", "bookmarks-to-tabs", "bidirectional"] },
+      { key: "syncInterval",           label: "Auto-sync interval (seconds, 0 = manual)", type: "number" },
+      { key: "cleanupEnabled",         label: "Enable automatic cleanup",      type: "checkbox" },
+      { key: "cleanupAge",             label: "Close tabs older than (days)",  type: "number" },
+      { key: "cleanupExcludeDomains",  label: "Exclude domains (comma-separated)", type: "text" },
+      { key: "memoryOptimization",     label: "Enable memory optimization",    type: "checkbox" },
+      { key: "memoryThreshold",        label: "Memory threshold (%)",          type: "number" },
+      { key: "keepEssentialTabs",      label: "Never cleanup Essential tabs",  type: "checkbox" },
+      { key: "keepPinnedTabs",         label: "Never cleanup Pinned tabs",     type: "checkbox" },
+      { key: "showToolbarButton",      label: "Show toolbar button",           type: "checkbox" },
+      { key: "debugMode",              label: "Debug logging",                 type: "checkbox" },
+    ];
+
+    const dialog = doc.createElementNS("http://www.w3.org/1999/xhtml", "dialog");
+    dialog.id = "zentabs-settings-dialog";
+    dialog.style.cssText = "padding:24px; min-width:480px; border-radius:8px; border:1px solid #ccc; font-family:system-ui,sans-serif;";
+
+    const title = doc.createElementNS("http://www.w3.org/1999/xhtml", "h2");
+    title.textContent = "ZenTabs Manager — Settings";
+    title.style.cssText = "margin:0 0 16px; font-size:16px;";
+    dialog.appendChild(title);
+
+    const form = doc.createElementNS("http://www.w3.org/1999/xhtml", "form");
+    form.style.cssText = "display:grid; grid-template-columns:1fr auto; gap:8px 16px; align-items:center;";
+
+    for (const field of fields) {
+      const label = doc.createElementNS("http://www.w3.org/1999/xhtml", "label");
+      label.textContent = field.label;
+      label.setAttribute("for", `zentabs-pref-${field.key}`);
+      label.style.fontSize = "13px";
+
+      let input;
+      if (field.type === "checkbox") {
+        input = doc.createElementNS("http://www.w3.org/1999/xhtml", "input");
+        input.type = "checkbox";
+        input.checked = !!prefs[field.key];
+      } else if (field.type === "select") {
+        input = doc.createElementNS("http://www.w3.org/1999/xhtml", "select");
+        input.style.cssText = "font-size:13px; padding:2px 4px;";
+        for (const opt of field.options) {
+          const o = doc.createElementNS("http://www.w3.org/1999/xhtml", "option");
+          o.value = opt;
+          o.textContent = opt;
+          if (prefs[field.key] === opt) o.selected = true;
+          input.appendChild(o);
+        }
+      } else {
+        input = doc.createElementNS("http://www.w3.org/1999/xhtml", "input");
+        input.type = field.type;
+        input.value = prefs[field.key] ?? "";
+        input.style.cssText = "font-size:13px; padding:2px 6px; width:160px;";
+      }
+      input.id = `zentabs-pref-${field.key}`;
+
+      form.appendChild(label);
+      form.appendChild(input);
+    }
+    dialog.appendChild(form);
+
+    // Buttons row
+    const btnRow = doc.createElementNS("http://www.w3.org/1999/xhtml", "div");
+    btnRow.style.cssText = "display:flex; justify-content:flex-end; gap:8px; margin-top:20px;";
+
+    const btnCancel = doc.createElementNS("http://www.w3.org/1999/xhtml", "button");
+    btnCancel.textContent = "Cancel";
+    btnCancel.style.cssText = "padding:6px 16px; font-size:13px; cursor:pointer;";
+    btnCancel.addEventListener("click", () => dialog.close());
+
+    const btnSave = doc.createElementNS("http://www.w3.org/1999/xhtml", "button");
+    btnSave.textContent = "Save";
+    btnSave.style.cssText = "padding:6px 16px; font-size:13px; cursor:pointer; background:#0060df; color:#fff; border:none; border-radius:4px;";
+    btnSave.addEventListener("click", async () => {
+      const newPrefs = {};
+      for (const field of fields) {
+        const el = doc.getElementById(`zentabs-pref-${field.key}`);
+        if (!el) continue;
+        if (field.type === "checkbox")   newPrefs[field.key] = el.checked;
+        else if (field.type === "number") newPrefs[field.key] = Number(el.value);
+        else                              newPrefs[field.key] = el.value;
+      }
+      try {
+        await this.manager.setPreferences(newPrefs);
+        this.showNotification("ZenTabs", "Settings saved");
+        dialog.close();
+      } catch (e) {
+        console.error("[ZenTabs] Failed to save settings:", e);
+      }
+    });
+
+    btnRow.appendChild(btnCancel);
+    btnRow.appendChild(btnSave);
+    dialog.appendChild(btnRow);
+
+    doc.documentElement.appendChild(dialog);
+    dialog.showModal();
   }
 
   /**
    * Show notification
    */
   showNotification(title, message) {
-    // Use Firefox notification system or fallback to console
-    if (this.manager.window.Notification && Notification.permission === "granted") {
-      new Notification(title, { body: message });
-    } else {
-      console.log(`[${title}] ${message}`);
-    }
+    console.log(`[ZenTabs] ${title}: ${message}`);
   }
 
   /**
