@@ -112,7 +112,7 @@ export class CleanupManager {
       // Close the tab
       if (!opts.dryRun) {
         try {
-          window.gBrowser.removeTab(tabData.tab);
+          this.manager.this.manager.window.gBrowser.removeTab(tabData.tab);
           result.closed++;
           result.tabs.push({
             title: tabData.title,
@@ -226,8 +226,8 @@ export class CleanupManager {
         }
         
         // Use Firefox's built-in tab discard
-        if (window.gBrowser.discardBrowser) {
-          window.gBrowser.discardBrowser(tab);
+        if (this.manager.this.manager.window.gBrowser.discardBrowser) {
+          this.manager.this.manager.window.gBrowser.discardBrowser(tab);
           result.unloaded++;
           result.saved += 50; // Estimate 50MB saved per tab
           this.unloadedTabs.add(tab);
@@ -260,8 +260,8 @@ export class CleanupManager {
   async getMemoryInfo() {
     try {
       // Try to get memory info from Firefox
-      if (window.performance && window.performance.memory) {
-        const mem = window.performance.memory;
+      if (this.manager.this.manager.window.performance && this.manager.this.manager.window.performance.memory) {
+        const mem = this.manager.this.manager.window.performance.memory;
         return {
           used: mem.usedJSHeapSize,
           total: mem.totalJSHeapSize,
@@ -326,7 +326,7 @@ export class CleanupManager {
    */
   onTabsChanged() {
     // Could trigger memory check if tab count is high
-    const tabs = window.gBrowser.tabs;
+    const tabs = this.manager.this.manager.window.gBrowser.tabs;
     if (tabs.length > 100 && this.manager.preferences.memoryOptimization) {
       // Check memory, but not too frequently (max once per 5 minutes)
       const now = Date.now();

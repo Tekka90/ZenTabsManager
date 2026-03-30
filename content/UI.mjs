@@ -33,14 +33,14 @@ export class UIManager {
    */
   createToolbarButton() {
     try {
-      const navbar = document.getElementById("nav-bar");
+      const navbar = this.manager.window.document.getElementById("nav-bar");
       if (!navbar) {
         this.log("Navigation bar not found");
         return;
       }
 
       // Create toolbar button
-      const button = document.createXULElement("toolbarbutton");
+      const button = this.manager.window.document.createXULElement("toolbarbutton");
       button.id = "zentabs-toolbar-button";
       button.setAttribute("class", "toolbarbutton-1 chromeclass-toolbar-additional");
       button.setAttribute("label", "ZenTabs");
@@ -51,7 +51,7 @@ export class UIManager {
       button.style.listStyleImage = "url('data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"%23666\" stroke-width=\"2\"><rect x=\"3\" y=\"3\" width=\"18\" height=\"4\" rx=\"1\"/><rect x=\"3\" y=\"10\" width=\"18\" height=\"4\" rx=\"1\"/><rect x=\"3\" y=\"17\" width=\"18\" height=\"4\" rx=\"1\"/><circle cx=\"18\" cy=\"5\" r=\"2\" fill=\"%23ff6b6b\"/></svg>')";
       
       // Create menu popup
-      const popup = document.createXULElement("menupopup");
+      const popup = this.manager.window.document.createXULElement("menupopup");
       popup.id = "zentabs-menu-popup";
       
       // Add menu items
@@ -85,7 +85,7 @@ export class UIManager {
    * Add menu item
    */
   addMenuItem(popup, label, onClick, shortcut = null) {
-    const item = document.createXULElement("menuitem");
+    const item = this.manager.window.document.createXULElement("menuitem");
     item.setAttribute("label", label);
     if (shortcut) {
       item.setAttribute("acceltext", shortcut);
@@ -99,7 +99,7 @@ export class UIManager {
    * Add menu separator
    */
   addMenuSeparator(popup) {
-    const sep = document.createXULElement("menuseparator");
+    const sep = this.manager.window.document.createXULElement("menuseparator");
     popup.appendChild(sep);
     return sep;
   }
@@ -126,7 +126,7 @@ export class UIManager {
       }
     };
     
-    window.addEventListener("keydown", this.keyHandler, true);
+    this.manager.window.addEventListener("keydown", this.keyHandler, true);
     this.log("Keyboard shortcuts registered");
   }
 
@@ -240,12 +240,12 @@ export class UIManager {
 
   async exportToJSON() {
     try {
-      const json = await window.ZenTabsAPI.exportToJSON();
+      const json = await this.manager.window.ZenTabsAPI.exportToJSON();
       
       // Create and download file
       const blob = new Blob([json], { type: "application/json" });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
+      const a = this.manager.window.document.createElement("a");
       a.href = url;
       a.download = `zentabs-export-${new Date().toISOString().split('T')[0]}.json`;
       a.click();
@@ -270,16 +270,16 @@ export class UIManager {
 ${JSON.stringify(this.manager.getPreferences(), null, 2)}
         </pre>
         <div style="margin-top: 20px; text-align: right;">
-          <button onclick="document.getElementById('zentabs-settings-dialog').close()">Close</button>
+          <button onclick="this.manager.window.document.getElementById('zentabs-settings-dialog').close()">Close</button>
         </div>
       </dialog>
     `;
     
     // Insert and show dialog
-    const container = document.createElement("div");
+    const container = this.manager.window.document.createElement("div");
     container.innerHTML = dialog;
-    document.body.appendChild(container);
-    document.getElementById("zentabs-settings-dialog").showModal();
+    this.manager.window.document.body.appendChild(container);
+    this.manager.window.document.getElementById("zentabs-settings-dialog").showModal();
   }
 
   /**
@@ -287,7 +287,7 @@ ${JSON.stringify(this.manager.getPreferences(), null, 2)}
    */
   showNotification(title, message) {
     // Use Firefox notification system or fallback to console
-    if (window.Notification && Notification.permission === "granted") {
+    if (this.manager.window.Notification && Notification.permission === "granted") {
       new Notification(title, { body: message });
     } else {
       console.log(`[${title}] ${message}`);
@@ -306,7 +306,7 @@ ${JSON.stringify(this.manager.getPreferences(), null, 2)}
    */
   async shutdown() {
     if (this.keyHandler) {
-      window.removeEventListener("keydown", this.keyHandler, true);
+      this.manager.window.removeEventListener("keydown", this.keyHandler, true);
     }
     
     if (this.toolbarButton && this.toolbarButton.parentNode) {

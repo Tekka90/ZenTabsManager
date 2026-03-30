@@ -11,6 +11,7 @@ dump("[ZenTabs] zen.sys.mjs loading...\n");
 class ZenTabsManager {
   constructor() {
     this.initialized = false;
+    this.window = null;
     this.preferences = {};
     this.tabManager = null;
     this.syncManager = null;
@@ -21,7 +22,12 @@ class ZenTabsManager {
     console.log("[ZenTabs] Manager created");
   }
 
-  async init() {
+  log(...args) {
+    console.log("[ZenTabs]", ...args);
+  }
+
+  async init(win) {
+    this.window = win;
     if (this.initialized) {
       console.log("[ZenTabs] Already initialized");
       return;
@@ -60,8 +66,8 @@ class ZenTabsManager {
       const { ZenTabsAPI } = await import("./zen.api.mjs");
       
       // Expose globally
-      window.ZenTabsManager = this;
-      window.ZenTabsAPI = ZenTabsAPI;
+      this.window.ZenTabsManager = this;
+      this.window.ZenTabsAPI = ZenTabsAPI;
       
     } catch (error) {
       console.error("❌ [ZenTabs] Initialization failed:", error);
@@ -71,13 +77,13 @@ class ZenTabsManager {
 
   async waitForBrowser() {
     return new Promise((resolve) => {
-      if (window.gBrowser?.tabs) {
+      if (this.window.gBrowser?.tabs) {
         resolve();
         return;
       }
       
       const interval = setInterval(() => {
-        if (window.gBrowser?.tabs) {
+        if (this.window.gBrowser?.tabs) {
           clearInterval(interval);
           resolve();
         }
@@ -120,9 +126,9 @@ class ZenTabsManager {
   }
 
   setupEventListeners() {
-    if (!window.gBrowser) return;
+    if (!this.window.gBrowser) return;
     
-    const tabs = window.gBrowser.tabContainer;
+    const tabs = this.window.gBrowser.tabContainer;
     
     tabs.addEventListener("TabOpen", (e) => 
       this.dispatchEvent("tab-created", { tab: e.target }));
@@ -235,7 +241,7 @@ function initZenTabs(window) {
   }
   
   console.log("[ZenTabs] Browser window ready, initializing manager...");
-  manager.init().catch(error => {
+  manager.init(window).catch(error => {
     console.error("[ZenTabs] Initialization failed:", error);
   });
 }

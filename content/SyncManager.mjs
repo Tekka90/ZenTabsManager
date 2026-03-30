@@ -33,7 +33,7 @@ export class SyncManager {
     
     try {
       // Get Zen folder bookmarks
-      const zenFolder = await this.getOrCreateFolder(window.PlacesUtils.bookmarks.toolbarGuid, "Zen");
+      const zenFolder = await this.getOrCreateFolder(this.manager.this.manager.window.PlacesUtils.bookmarks.toolbarGuid, "Zen");
       const bookmarks = await this.getAllBookmarksInFolder(zenFolder);
       
       for (const bm of bookmarks) {
@@ -53,12 +53,12 @@ export class SyncManager {
    */
   async getAllBookmarksInFolder(folderGuid) {
     const bookmarks = [];
-    const children = await window.PlacesUtils.bookmarks.getChildBookmarks(folderGuid);
+    const children = await this.manager.this.manager.window.PlacesUtils.bookmarks.getChildBookmarks(folderGuid);
     
     for (const child of children) {
-      if (child.type === window.PlacesUtils.bookmarks.TYPE_BOOKMARK) {
+      if (child.type === this.manager.this.manager.window.PlacesUtils.bookmarks.TYPE_BOOKMARK) {
         bookmarks.push(child);
-      } else if (child.type === window.PlacesUtils.bookmarks.TYPE_FOLDER) {
+      } else if (child.type === this.manager.this.manager.window.PlacesUtils.bookmarks.TYPE_FOLDER) {
         const subBookmarks = await this.getAllBookmarksInFolder(child.guid);
         bookmarks.push(...subBookmarks);
       }
@@ -72,7 +72,7 @@ export class SyncManager {
    */
   setupBookmarkObserver() {
     // Listen for bookmark changes
-    if (window.PlacesUtils && window.PlacesUtils.observers) {
+    if (this.manager.this.manager.window.PlacesUtils && this.manager.this.manager.window.PlacesUtils.observers) {
       const observer = {
         onItemAdded: (id, parent, index, type, uri) => {
           if (uri) {
@@ -91,7 +91,7 @@ export class SyncManager {
       
       // This might not work in all Firefox versions, fallback gracefully
       try {
-        window.PlacesUtils.observers.addListener(["bookmark-added", "bookmark-removed", "bookmark-changed"], observer);
+        this.manager.this.manager.window.PlacesUtils.observers.addListener(["bookmark-added", "bookmark-removed", "bookmark-changed"], observer);
       } catch (e) {
         this.log("Could not setup bookmark observer:", e.message);
       }
@@ -156,7 +156,7 @@ export class SyncManager {
     
     this.log("Syncing tabs to bookmarks...");
     
-    const toolbarGuid = window.PlacesUtils.bookmarks.toolbarGuid;
+    const toolbarGuid = this.manager.this.manager.window.PlacesUtils.bookmarks.toolbarGuid;
     const zenFolderGuid = await this.getOrCreateFolder(toolbarGuid, "Zen");
     const essentialsFolderGuid = await this.getOrCreateFolder(zenFolderGuid, "Essentials");
     
@@ -269,7 +269,7 @@ export class SyncManager {
   async syncFromBookmarks(folderPath = "Zen") {
     this.log("Syncing bookmarks to tabs...");
     
-    const toolbarGuid = window.PlacesUtils.bookmarks.toolbarGuid;
+    const toolbarGuid = this.manager.this.manager.window.PlacesUtils.bookmarks.toolbarGuid;
     const zenFolderGuid = await this.getOrCreateFolder(toolbarGuid, "Zen");
     
     const bookmarks = await this.getAllBookmarksInFolder(zenFolderGuid);
@@ -297,7 +297,7 @@ export class SyncManager {
       
       try {
         // Open tab in background
-        window.gBrowser.addTab(bm.url, {
+        this.manager.this.manager.window.gBrowser.addTab(bm.url, {
           inBackground: true,
           triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
         });
@@ -336,9 +336,9 @@ export class SyncManager {
    * Get or create bookmark folder
    */
   async getOrCreateFolder(parentId, title) {
-    const existing = await window.PlacesUtils.bookmarks.search({ 
+    const existing = await this.manager.this.manager.window.PlacesUtils.bookmarks.search({ 
       query: title,
-      type: window.PlacesUtils.bookmarks.TYPE_FOLDER 
+      type: this.manager.this.manager.window.PlacesUtils.bookmarks.TYPE_FOLDER 
     });
     
     for (const bookmark of existing) {
@@ -347,9 +347,9 @@ export class SyncManager {
       }
     }
     
-    const folder = await window.PlacesUtils.bookmarks.insert({
+    const folder = await this.manager.this.manager.window.PlacesUtils.bookmarks.insert({
       parentGuid: parentId,
-      type: window.PlacesUtils.bookmarks.TYPE_FOLDER,
+      type: this.manager.this.manager.window.PlacesUtils.bookmarks.TYPE_FOLDER,
       title: title
     });
     
@@ -361,20 +361,20 @@ export class SyncManager {
    * @returns {boolean} true if created, false if updated
    */
   async createOrUpdateBookmark(parentId, title, url) {
-    const existing = await window.PlacesUtils.bookmarks.search({ url: url });
+    const existing = await this.manager.this.manager.window.PlacesUtils.bookmarks.search({ url: url });
     
     for (const bookmark of existing) {
       if (bookmark.parentGuid === parentId) {
         if (bookmark.title !== title) {
-          await window.PlacesUtils.bookmarks.update(bookmark.guid, { title });
+          await this.manager.this.manager.window.PlacesUtils.bookmarks.update(bookmark.guid, { title });
         }
         return false; // Updated
       }
     }
     
-    await window.PlacesUtils.bookmarks.insert({
+    await this.manager.this.manager.window.PlacesUtils.bookmarks.insert({
       parentGuid: parentId,
-      type: window.PlacesUtils.bookmarks.TYPE_BOOKMARK,
+      type: this.manager.this.manager.window.PlacesUtils.bookmarks.TYPE_BOOKMARK,
       title: title,
       url: url
     });
@@ -391,14 +391,14 @@ export class SyncManager {
     if (this.manager.preferences.syncDirection === "bidirectional" && 
         this.manager.preferences.syncEnabled) {
       // Check if tab already exists
-      const tabs = window.gBrowser.tabs;
+      const tabs = this.manager.this.manager.window.gBrowser.tabs;
       for (const tab of tabs) {
         if (tab.linkedBrowser.currentURI?.spec === url) {
           return; // Tab exists
         }
       }
       // Open tab
-      window.gBrowser.addTab(url, { inBackground: true });
+      this.manager.this.manager.window.gBrowser.addTab(url, { inBackground: true });
     }
   }
 
