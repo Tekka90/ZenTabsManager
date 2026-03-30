@@ -142,17 +142,17 @@ class ZenTabsManager {
     const { syncEnabled, syncInterval, cleanupEnabled, memoryOptimization } = this.preferences;
     
     if (syncEnabled && syncInterval > 0) {
-      this.syncInterval = setInterval(() => 
+      this.syncInterval = this.window.setInterval(() => 
         this.syncManager.performSync(), syncInterval * 1000);
     }
     
     if (cleanupEnabled) {
-      this.cleanupInterval = setInterval(() => 
+      this.cleanupInterval = this.window.setInterval(() => 
         this.cleanupManager.runCleanup(), 3600 * 1000);
     }
     
     if (memoryOptimization) {
-      this.memoryInterval = setInterval(() => 
+      this.memoryInterval = this.window.setInterval(() => 
         this.cleanupManager.checkMemoryUsage(), 300 * 1000);
     }
   }
@@ -217,9 +217,9 @@ class ZenTabsManager {
   }
 
   async shutdown() {
-    clearInterval(this.syncInterval);
-    clearInterval(this.cleanupInterval);
-    clearInterval(this.memoryInterval);
+    this.window?.clearInterval(this.syncInterval);
+    this.window?.clearInterval(this.cleanupInterval);
+    this.window?.clearInterval(this.memoryInterval);
     
     await this.uiManager?.shutdown();
     await this.cleanupManager?.shutdown();

@@ -53,17 +53,23 @@ export class SyncManager {
    */
   async getAllBookmarksInFolder(folderGuid) {
     const bookmarks = [];
-    const children = await this.manager.window.PlacesUtils.bookmarks.getChildBookmarks(folderGuid);
-    
-    for (const child of children) {
-      if (child.type === this.manager.window.PlacesUtils.bookmarks.TYPE_BOOKMARK) {
-        bookmarks.push(child);
-      } else if (child.type === this.manager.window.PlacesUtils.bookmarks.TYPE_FOLDER) {
-        const subBookmarks = await this.getAllBookmarksInFolder(child.guid);
-        bookmarks.push(...subBookmarks);
+    try {
+      const PlacesUtils = this.manager.window.PlacesUtils;
+      const tree = await PlacesUtils.promiseBookmarksTree(folderGuid, { includeItemIds: false });
+      if (!tree || !tree.children) return bookmarks;
+
+      for (const child of tree.children) {
+        if (child.uri) {
+          bookmarks.push({ url: child.uri, guid: child.guid, title: child.title || "" });
+        }
+        if (child.type === PlacesUtils.bookmarks.TYPE_FOLDER) {
+          const subBookmarks = await this.getAllBookmarksInFolder(child.guid);
+          bookmarks.push(...subBookmarks);
+        }
       }
+    } catch (error) {
+      console.error("Error getting bookmarks in folder:", error);
     }
-    
     return bookmarks;
   }
 
@@ -91,7 +97,7 @@ export class SyncManager {
       
       // This might not work in all Firefox versions, fallback gracefully
       try {
-        this.manager.window.PlacesUtils.observers.addListener(["bookmark-added", "bookmark-removed", "bookmark-changed"], observer);
+        this.manager.window.PlacesUtils.observers.addListener(["bookmark-added", "bookmark-removed", "bookmark-title-changed", "bookmark-url-changed"], observer);
       } catch (e) {
         this.log("Could not setup bookmark observer:", e.message);
       }
