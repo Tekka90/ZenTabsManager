@@ -105,7 +105,8 @@ export class SyncManager {
         if (child.uri) {
           bookmarks.push({ url: child.uri, guid: child.guid, title: child.title || "" });
         }
-        if (child.type === PlacesUtils.bookmarks.TYPE_FOLDER) {
+        if (child.uri == null && child.children !== undefined) {
+          // node has no URI and has children → it's a folder; recurse
           const subBookmarks = await this.getAllBookmarksInFolder(child.guid);
           bookmarks.push(...subBookmarks);
         }
@@ -138,7 +139,9 @@ export class SyncManager {
     if (!zenTree || !zenTree.children) return result;
 
     for (const spaceFolder of zenTree.children) {
-      if (spaceFolder.type !== PlacesUtils.bookmarks.TYPE_FOLDER) continue;
+      // Use uri == null to detect folders: promiseBookmarksTree returns integer types
+      // that do NOT match the PlacesUtils.bookmarks.TYPE_FOLDER string constant.
+      if (spaceFolder.uri != null) continue; // skip bookmarks / separators
       const spaceUuid = spaceByName.get(spaceFolder.title) ?? null;
       if (!result.has(spaceUuid)) result.set(spaceUuid, new Map());
       const urlMap = result.get(spaceUuid);
@@ -354,7 +357,9 @@ export class SyncManager {
     if (!zenTree || !zenTree.children) return result;
 
     for (const spaceFolder of zenTree.children) {
-      if (spaceFolder.type !== PlacesUtils.bookmarks.TYPE_FOLDER) continue;
+      // Use uri == null to detect folders — promiseBookmarksTree integer types
+      // don't match PlacesUtils.bookmarks.TYPE_FOLDER string constant.
+      if (spaceFolder.uri != null) continue;
       const folderName = spaceFolder.title;
 
       // Look up existing space by name, or create it if it doesn't exist yet

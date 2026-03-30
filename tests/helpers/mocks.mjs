@@ -63,7 +63,12 @@ export function makePlacesUtils() {
       guid:     node.guid,
       title:    node.title,
       uri:      node.url ?? null,
-      type:     node.type === "folder" ? "folder" : "bookmark",
+      // Real Firefox promiseBookmarksTree returns integer types from nsINavBookmarksService:
+      //   TYPE_FOLDER = 6 (nsINavHistoryResultNode.RESULT_TYPE_FOLDER)
+      //   TYPE_BOOKMARK = 5 (nsINavHistoryResultNode.RESULT_TYPE_URI)
+      // These do NOT match PlacesUtils.bookmarks.TYPE_FOLDER ("folder" string).
+      // Code must not use TYPE_FOLDER to detect folder nodes in tree output.
+      type:     node.type === "folder" ? 6 : 5,
       children: children.length ? children : undefined,
     };
   }

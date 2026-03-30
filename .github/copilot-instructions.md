@@ -264,6 +264,7 @@ When researching internal Zen Browser APIs, components, or behavior, refer to th
 4. **Tests must pass before considering a task done** — run `npm test` after every change.
 5. **Do not use browser globals in tests** — use the stubs in `tests/helpers/mocks.mjs`. Add new stubs there rather than patching `globalThis` ad-hoc inside individual tests (except for `globalThis.Services` which mocks.mjs already sets).
 6. **Documentation updated** → when adding or changing any feature, update all .md files to reflect: new preferences (add to the Preferences table), new API methods (add to the Public API section), architectural changes (update the Architecture section), new events (add to the Event System table).
+7. **`theme.json` `updatedAt` bumped** → after every change session, update the `updatedAt` field in `theme.json` to the current UTC datetime (`YYYY-MM-DDTHH:MM:SS`). Sine uses this timestamp to detect that the mod has changed and prompt the user to reload.
 
 ### File mapping
 | Source file | Test file |
