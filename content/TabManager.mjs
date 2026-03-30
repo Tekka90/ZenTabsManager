@@ -30,7 +30,7 @@ export class TabManager {
    */
   async rebuildCache() {
     this.tabMetadataCache.clear();
-    const tabs = this.manager.this.manager.this.manager.window.gBrowser.tabs;
+    const tabs = this.manager.window.gBrowser.tabs;
     
     for (const tab of tabs) {
       this.cacheTabMetadata(tab);
@@ -110,11 +110,11 @@ export class TabManager {
    * Get workspace information
    */
   getWorkspaceInfo(tab) {
-    if (typeof this.manager.this.manager.this.manager.window.gZenWorkspaces !== "undefined") {
+    if (typeof this.manager.window.gZenWorkspaces !== "undefined") {
       const workspaceId = tab.getAttribute("zen-workspace-id");
       if (workspaceId) {
         try {
-          const workspace = this.manager.this.manager.this.manager.window.gZenWorkspaces.getWorkspaceById(workspaceId);
+          const workspace = this.manager.window.gZenWorkspaces.getWorkspaceById(workspaceId);
           return {
             id: workspaceId,
             name: workspace ? workspace.name : workspaceId
@@ -175,7 +175,7 @@ export class TabManager {
    * Get all tabs with full metadata
    */
   async getAllTabs() {
-    const tabs = this.manager.this.manager.this.manager.window.gBrowser.tabs;
+    const tabs = this.manager.window.gBrowser.tabs;
     const result = [];
     
     for (const tab of tabs) {
