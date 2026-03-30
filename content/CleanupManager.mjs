@@ -57,11 +57,12 @@ export class CleanupManager {
   async cleanupOldTabs(options = {}) {
     const opts = {
       maxAge: this.manager.preferences.cleanupAge || 7,
+      maxAgeUnit: this.manager.preferences.cleanupAgeUnit || "days",
       excludeDomains: options.excludeDomains || this.parseExcludeDomains(),
       dryRun: options.dryRun || false
     };
     
-    this.log("Cleaning up tabs older than", opts.maxAge, "days");
+    this.log("Cleaning up tabs older than", opts.maxAge, opts.maxAgeUnit);
     
     const result = {
       checked: 0,
@@ -73,7 +74,8 @@ export class CleanupManager {
     };
     
     const allTabs = await this.manager.tabManager.getAllTabs();
-    const maxAgeMs = opts.maxAge * 24 * 60 * 60 * 1000;
+    const unitMs = opts.maxAgeUnit === "hours" ? 3600 * 1000 : 24 * 3600 * 1000;
+    const maxAgeMs = opts.maxAge * unitMs;
     
     for (const tabData of allTabs) {
       result.checked++;
@@ -136,6 +138,44 @@ export class CleanupManager {
     this.log(`Cleanup complete: closed ${result.closed}, protected ${result.protected}, excluded ${result.excluded}`);
     
     return result;
+  }
+
+  /**
+   * Unload tabs that haven't been touched for longer than autoUnloadDelay seconds.
+   * Works the same as memory optimisation (discard, not close) but is time-driven.
+   * Respects keepEssentialTabs / keepPinnedTabs and never unloads the active tab.
+   */
+  async unloadStaleTabs() {
+    if (!this.manager.preferences.autoUnloadEnabled) return;
+    if (this.manager.preferences.paused) return;
+
+    const delayMs = (this.manager.preferences.autoUnloadDelay || 3600) * 1000;
+    const allTabs = await this.manager.tabManager.getAllTabs();
+    let unloaded = 0;
+
+    for (const tabData of allTabs) {
+      if (tabData.state.includes("active"))    continue;
+      if (tabData.state.includes("discarded")) continue;
+      if (tabData.state.includes("loading"))  continue;
+      if (tabData.type === "essential" && this.manager.preferences.keepEssentialTabs) continue;
+      if (tabData.type === "pinned"    && this.manager.preferences.keepPinnedTabs)    continue;
+
+      if (tabData.lastAccessedAge.milliseconds < delayMs) continue;
+
+      try {
+        if (this.manager.window.gBrowser.discardBrowser) {
+          this.manager.window.gBrowser.discardBrowser(tabData.tab);
+          unloaded++;
+          this.log(`Auto-unloaded stale tab: ${tabData.title} (idle ${tabData.lastAccessedAge.seconds}s)`);
+        }
+      } catch (e) {
+        console.error("[ZenTabs] Error auto-unloading tab:", e);
+      }
+    }
+
+    if (unloaded > 0) {
+      this.manager.dispatchEvent("tabs-auto-unloaded", { count: unloaded });
+    }
   }
 
   /**
@@ -255,41 +295,45 @@ export class CleanupManager {
   }
 
   /**
-   * Get memory information
+   * Get memory information using Gecko-native APIs.
+   * - ChromeUtils.requestProcInfo() → actual RSS of all browser processes
+   * - Services.sysinfo.getProperty("memsize") → total physical RAM
+   * Falls back to a tab-count heuristic if native APIs are unavailable.
    */
   async getMemoryInfo() {
     try {
-      // Try to get memory info from Firefox
-      if (this.manager.window.performance && this.manager.window.performance.memory) {
-        const mem = this.manager.window.performance.memory;
-        return {
-          used: mem.usedJSHeapSize,
-          total: mem.totalJSHeapSize,
-          limit: mem.jsHeapSizeLimit,
-          percentUsed: Math.round((mem.usedJSHeapSize / mem.jsHeapSizeLimit) * 100)
-        };
+      // Total physical RAM (bytes)
+      const totalRam = parseInt(Services.sysinfo.getProperty("memsize")) || (8 * 1024 * 1024 * 1024);
+
+      // Actual browser memory usage: sum RSS across main + content processes
+      const procInfo = await ChromeUtils.requestProcInfo();
+      let usedBytes = procInfo.memory ?? 0;
+      for (const child of procInfo.children ?? []) {
+        usedBytes += child.memory ?? 0;
       }
-      
-      // Fallback: estimate based on tab count
-      const tabs = await this.manager.tabManager.getAllTabs();
-      const activeTabs = tabs.filter(t => !t.state.includes("discarded")).length;
-      const estimatedUsed = activeTabs * 50; // 50MB per tab
-      const estimatedLimit = 4000; // 4GB estimate
-      
+
       return {
-        used: estimatedUsed * 1024 * 1024,
-        total: estimatedUsed * 1024 * 1024,
-        limit: estimatedLimit * 1024 * 1024,
-        percentUsed: Math.round((estimatedUsed / estimatedLimit) * 100)
+        used: usedBytes,
+        total: totalRam,
+        limit: totalRam,
+        percentUsed: Math.min(100, Math.round((usedBytes / totalRam) * 100))
       };
     } catch (error) {
-      console.error("Error getting memory info:", error);
-      return {
-        used: 0,
-        total: 0,
-        limit: 1,
-        percentUsed: 0
-      };
+      // Fallback: estimate based on tab count (50 MB per active tab, 8 GB ceiling)
+      try {
+        const tabs = await this.manager.tabManager.getAllTabs();
+        const activeTabs = tabs.filter(t => !t.state.includes("discarded")).length;
+        const estimatedUsed = activeTabs * 50 * 1024 * 1024;
+        const estimatedLimit = 8 * 1024 * 1024 * 1024;
+        return {
+          used: estimatedUsed,
+          total: estimatedLimit,
+          limit: estimatedLimit,
+          percentUsed: Math.min(100, Math.round((estimatedUsed / estimatedLimit) * 100))
+        };
+      } catch (e) {
+        return { used: 0, total: 0, limit: 1, percentUsed: 0 };
+      }
     }
   }
 

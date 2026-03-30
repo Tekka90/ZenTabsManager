@@ -152,6 +152,7 @@ export function makeTab(overrides = {}) {
 export function makeGBrowser(tabs = []) {
   const openTabs = [...tabs];
   const removed = [];
+  const discarded = [];
   return {
     get tabs() { return openTabs; },
     addTab(url, opts) {
@@ -164,8 +165,13 @@ export function makeGBrowser(tabs = []) {
       if (idx !== -1) openTabs.splice(idx, 1);
       removed.push(tab);
     },
+    discardBrowser(tab) {
+      tab.setAttribute("discarded", "");
+      discarded.push(tab);
+    },
     tabContainer: { addEventListener: () => {} },
     _removed: removed,
+    _discarded: discarded,
   };
 }
 
@@ -211,9 +217,12 @@ export function makeManager({
     syncCloseRemovedTabs: false,
     cleanupEnabled:       false,
     cleanupAge:           7,
+    cleanupAgeUnit:       "days",
     cleanupExcludeDomains: "",
     memoryOptimization:   false,
     memoryThreshold:      80,
+    autoUnloadEnabled:    false,
+    autoUnloadDelay:      3600,
     keepEssentialTabs:    true,
     keepPinnedTabs:       true,
     showToolbarButton:    false,

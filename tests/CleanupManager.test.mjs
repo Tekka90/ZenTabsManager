@@ -187,3 +187,204 @@ describe("isDomainExcluded", () => {
     assert.doesNotThrow(() => cm.isDomainExcluded("not-a-url", ["example.com"]));
   });
 });
+
+// ── cleanupOldTabs: hours unit ────────────────────────────────────────────
+
+describe("cleanupOldTabs — hours unit", () => {
+  test("closes tab older than threshold in hours", async () => {
+    const HOUR_MS = 3600000;
+    const old = makeTab({ url: "https://old.com", lastAccessed: Date.now() - 5 * HOUR_MS });
+    const { cm, mgr } = makeCleanup([old], { cleanupAge: 2, cleanupAgeUnit: "hours" });
+
+    const r = await cm.cleanupOldTabs({ dryRun: false });
+
+    assert.equal(r.closed, 1);
+    assert.equal(mgr.window.gBrowser._removed.length, 1);
+  });
+
+  test("keeps tab younger than threshold in hours", async () => {
+    const HOUR_MS = 3600000;
+    const fresh = makeTab({ url: "https://fresh.com", lastAccessed: Date.now() - 1 * HOUR_MS });
+    const { cm } = makeCleanup([fresh], { cleanupAge: 2, cleanupAgeUnit: "hours" });
+
+    const r = await cm.cleanupOldTabs({ dryRun: false });
+
+    assert.equal(r.closed, 0);
+  });
+});
+
+// ── unloadStaleTabs ───────────────────────────────────────────────────────
+
+describe("unloadStaleTabs", () => {
+  function makeUnloadCleanup(tabDefs, prefs = {}) {
+    const tabs = tabDefs.map(d => makeTab(d));
+    const mgr = makeManager({ tabs, preferences: { autoUnloadEnabled: true, autoUnloadDelay: 3600, ...prefs } });
+    const tabData = tabs.map((tab, i) => ({
+      tab,
+      title: tab.label ?? `Tab ${i}`,
+      url: tab.linkedBrowser.currentURI.spec,
+      type: tab.hasAttribute("zen-essential") ? "essential" : tab.pinned ? "pinned" : "normal",
+      lastAccessedAge: { milliseconds: Date.now() - (tab.lastAccessed ?? Date.now()), seconds: Math.floor((Date.now() - (tab.lastAccessed ?? Date.now())) / 1000) },
+      state: tab.selected ? ["active"] : tab.hasAttribute("discarded") ? ["discarded"] : [],
+    }));
+    mgr.tabManager = { getAllTabs: async () => tabData };
+    mgr.window.gBrowser.discardBrowser = (tab) => { tab.setAttribute("discarded", ""); mgr.window.gBrowser._discarded.push(tab); };
+    const cm = new CleanupManager(mgr);
+    return { cm, mgr, tabs };
+  }
+
+  test("does nothing when autoUnloadEnabled=false", async () => {
+    const { cm, mgr } = makeUnloadCleanup(
+      [{ url: "https://old.com", lastAccessed: Date.now() - 7200000 }],
+      { autoUnloadEnabled: false }
+    );
+    await cm.unloadStaleTabs();
+    assert.equal(mgr.window.gBrowser._discarded.length, 0);
+  });
+
+  test("does nothing when paused", async () => {
+    const { cm, mgr } = makeUnloadCleanup(
+      [{ url: "https://old.com", lastAccessed: Date.now() - 7200000 }],
+      { paused: true }
+    );
+    await cm.unloadStaleTabs();
+    assert.equal(mgr.window.gBrowser._discarded.length, 0);
+  });
+
+  test("discards tab idle longer than autoUnloadDelay", async () => {
+    const { cm, mgr } = makeUnloadCleanup([
+      { url: "https://idle.com", lastAccessed: Date.now() - 7200000 }, // 2 hours idle
+    ], { autoUnloadDelay: 3600 }); // 1 hour threshold
+
+    await cm.unloadStaleTabs();
+    assert.equal(mgr.window.gBrowser._discarded.length, 1);
+  });
+
+  test("does not discard tab idle less than autoUnloadDelay", async () => {
+    const { cm, mgr } = makeUnloadCleanup([
+      { url: "https://recent.com", lastAccessed: Date.now() - 1000 }, // 1 second idle
+    ], { autoUnloadDelay: 3600 });
+
+    await cm.unloadStaleTabs();
+    assert.equal(mgr.window.gBrowser._discarded.length, 0);
+  });
+
+  test("skips active tab", async () => {
+    const { cm, mgr } = makeUnloadCleanup([
+      { url: "https://active.com", lastAccessed: Date.now() - 7200000, selected: true },
+    ]);
+    await cm.unloadStaleTabs();
+    assert.equal(mgr.window.gBrowser._discarded.length, 0);
+  });
+
+  test("skips already discarded tab", async () => {
+    const { cm, mgr } = makeUnloadCleanup([
+      { url: "https://disc.com", lastAccessed: Date.now() - 7200000, attrs: { discarded: "" } },
+    ]);
+    await cm.unloadStaleTabs();
+    // The tab was already discarded, state array contains "discarded" → skip
+    assert.equal(mgr.window.gBrowser._discarded.length, 0);
+  });
+
+  test("protects essential tab when keepEssentialTabs=true", async () => {
+    const { cm, mgr } = makeUnloadCleanup([
+      { url: "https://ess.com", lastAccessed: Date.now() - 7200000, attrs: { "zen-essential": "" } },
+    ], { keepEssentialTabs: true });
+    await cm.unloadStaleTabs();
+    assert.equal(mgr.window.gBrowser._discarded.length, 0);
+  });
+
+  test("protects pinned tab when keepPinnedTabs=true", async () => {
+    const { cm, mgr } = makeUnloadCleanup([
+      { url: "https://pin.com", pinned: true, lastAccessed: Date.now() - 7200000 },
+    ], { keepPinnedTabs: true });
+    await cm.unloadStaleTabs();
+    assert.equal(mgr.window.gBrowser._discarded.length, 0);
+  });
+
+  test("dispatches tabs-auto-unloaded event when tabs are unloaded", async () => {
+    const { cm, mgr } = makeUnloadCleanup([
+      { url: "https://idle.com", lastAccessed: Date.now() - 7200000 },
+    ]);
+    let eventFired = false;
+    mgr.on("tabs-auto-unloaded", () => { eventFired = true; });
+    await cm.unloadStaleTabs();
+    assert.ok(eventFired);
+  });
+});
+
+// ── optimizeMemory ────────────────────────────────────────────────────────
+
+describe("optimizeMemory", () => {
+  test("skips optimization when not forced and memory is fine", async () => {
+    const tab = makeTab({ url: "https://a.com" });
+    const mgr = makeManager({ tabs: [tab], preferences: { memoryThreshold: 80 } });
+    mgr.tabManager = { getAllTabs: async () => [{ tab, title: "A", url: "https://a.com", type: "normal", state: [], lastAccessedAge: { milliseconds: 0, days: 0 } }] };
+    const cm = new CleanupManager(mgr);
+
+    // Inject a getMemoryInfo that reports 10% usage (well under threshold)
+    cm.getMemoryInfo = async () => ({ used: 1, total: 10, limit: 10, percentUsed: 10 });
+
+    const r = await cm.optimizeMemory({ force: false });
+    assert.equal(r.optimized, 0);
+  });
+
+  test("discards oldest inactive tabs when forced", async () => {
+    const t1 = makeTab({ url: "https://old.com",  lastAccessed: Date.now() - 7200000 });
+    const t2 = makeTab({ url: "https://new.com",  lastAccessed: Date.now() - 100 });
+    const mgr = makeManager({ tabs: [t1, t2], preferences: { keepEssentialTabs: true, memoryThreshold: 80 } });
+    mgr.window.gBrowser.discardBrowser = (tab) => { tab.setAttribute("discarded", ""); mgr.window.gBrowser._discarded.push(tab); };
+
+    const tabDataList = [
+      { tab: t1, title: "old", url: "https://old.com", type: "normal", state: [], lastAccessedAge: { milliseconds: 7200000, days: 0 } },
+      { tab: t2, title: "new", url: "https://new.com", type: "normal", state: [], lastAccessedAge: { milliseconds: 100,     days: 0 } },
+    ];
+    mgr.tabManager = { getAllTabs: async () => tabDataList };
+    const cm = new CleanupManager(mgr);
+    cm.getMemoryInfo = async () => ({ used: 9, total: 10, limit: 10, percentUsed: 90 });
+
+    const r = await cm.optimizeMemory({ force: true });
+    assert.ok(r.unloaded >= 1);
+    assert.ok(mgr.window.gBrowser._discarded.length >= 1);
+  });
+});
+
+// ── checkMemoryUsage ──────────────────────────────────────────────────────
+
+describe("checkMemoryUsage", () => {
+  test("does nothing when memoryOptimization=false", async () => {
+    const { cm } = makeCleanup([], { memoryOptimization: false });
+    // Should return undefined without calling optimizeMemory
+    const r = await cm.checkMemoryUsage();
+    assert.equal(r, undefined);
+  });
+
+  test("triggers optimizeMemory when usage exceeds threshold", async () => {
+    const tab = makeTab({ url: "https://a.com", lastAccessed: Date.now() - 1000 });
+    const mgr = makeManager({ tabs: [tab], preferences: { memoryOptimization: true, memoryThreshold: 80 } });
+    mgr.window.gBrowser.discardBrowser = (t) => { t.setAttribute("discarded", ""); };
+    mgr.tabManager = { getAllTabs: async () => [{ tab, title: "A", url: "https://a.com", type: "normal", state: [], lastAccessedAge: { milliseconds: 1000, days: 0 } }] };
+    const cm = new CleanupManager(mgr);
+    cm.getMemoryInfo = async () => ({ used: 9, total: 10, limit: 10, percentUsed: 90 });
+
+    let optimizeCalled = false;
+    const orig = cm.optimizeMemory.bind(cm);
+    cm.optimizeMemory = async (opts) => { optimizeCalled = true; return orig(opts); };
+
+    await cm.checkMemoryUsage();
+    assert.ok(optimizeCalled);
+  });
+
+  test("does not trigger optimizeMemory when usage is below threshold", async () => {
+    const mgr = makeManager({ preferences: { memoryOptimization: true, memoryThreshold: 80 } });
+    mgr.tabManager = { getAllTabs: async () => [] };
+    const cm = new CleanupManager(mgr);
+    cm.getMemoryInfo = async () => ({ used: 1, total: 10, limit: 10, percentUsed: 10 });
+
+    let optimizeCalled = false;
+    cm.optimizeMemory = async () => { optimizeCalled = true; };
+
+    await cm.checkMemoryUsage();
+    assert.ok(!optimizeCalled);
+  });
+});

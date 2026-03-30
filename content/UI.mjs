@@ -290,24 +290,73 @@ export class UIManager {
     const prefs = this.manager.getPreferences();
 
     const fields = [
-      { key: "syncEnabled",           label: "Enable bookmark sync",          type: "checkbox" },
-      { key: "syncDirection",          label: "Sync direction",                type: "select",   options: ["tabs-to-bookmarks", "bookmarks-to-tabs", "bidirectional"] },
-      { key: "syncInterval",           label: "Auto-sync interval (seconds, 0 = manual)", type: "number" },
-      { key: "syncCloseRemovedTabs",   label: "Close tabs deleted on another computer (bidirectional)", type: "checkbox" },
-      { key: "cleanupEnabled",         label: "Enable automatic cleanup",      type: "checkbox" },
-      { key: "cleanupAge",             label: "Close tabs older than (days)",  type: "number" },
-      { key: "cleanupExcludeDomains",  label: "Exclude domains (comma-separated)", type: "text" },
-      { key: "memoryOptimization",     label: "Enable memory optimization",    type: "checkbox" },
-      { key: "memoryThreshold",        label: "Memory threshold (%)",          type: "number" },
-      { key: "keepEssentialTabs",      label: "Never cleanup Essential tabs",  type: "checkbox" },
-      { key: "keepPinnedTabs",         label: "Never cleanup Pinned tabs",     type: "checkbox" },
-      { key: "showToolbarButton",      label: "Show toolbar button",           type: "checkbox" },
-      { key: "debugMode",              label: "Debug logging",                 type: "checkbox" },
+      {
+        key: "syncEnabled", label: "Enable bookmark sync", type: "checkbox",
+        tooltip: "When enabled, ZenTabs will synchronise your essential and pinned tabs with a bookmark folder called 'Zen' on your toolbar. These bookmarks are then synced across computers via Firefox Sync."
+      },
+      {
+        key: "syncDirection", label: "Sync direction", type: "select",
+        options: ["tabs-to-bookmarks", "bookmarks-to-tabs", "bidirectional"],
+        tooltip: "tabs-to-bookmarks: open tabs are the source of truth — bookmarks are overwritten.\nbookmarks-to-tabs: bookmarks are the source of truth — missing tabs are opened.\nbidirectional: 3-way merge using a local manifest to detect additions and deletions on either side."
+      },
+      {
+        key: "syncInterval", label: "Auto-sync interval (seconds, 0 = manual)", type: "number",
+        tooltip: "How often the automatic sync runs in the background, in seconds. Set to 0 to disable automatic sync and trigger it manually from the toolbar menu."
+      },
+      {
+        key: "syncCloseRemovedTabs", label: "Close tabs deleted on another computer (bidirectional)", type: "checkbox",
+        tooltip: "In bidirectional mode: if a bookmark was present at last sync but is now gone (deleted on another computer), close the corresponding local tab. Disabled by default for safety — essential and pinned tabs are never auto-closed regardless."
+      },
+      {
+        key: "cleanupEnabled", label: "Enable automatic cleanup", type: "checkbox",
+        tooltip: "Runs every hour and automatically closes normal tabs that haven't been accessed for longer than the threshold below. Essential and pinned tabs are protected. Domains in the exclude list are also skipped."
+      },
+      {
+        key: "cleanupAge", label: "Close tabs older than", type: "number-with-unit",
+        unitKey: "cleanupAgeUnit", unitOptions: ["hours", "days"],
+        tooltip: "Tabs not accessed for longer than this duration will be automatically closed by the cleanup job. Applies to normal tabs only."
+      },
+      {
+        key: "cleanupExcludeDomains", label: "Exclude domains (comma-separated)", type: "text",
+        tooltip: "Tabs whose URL matches any of these domains (or subdomains) will never be closed by automatic cleanup. Example: github.com, notion.so"
+      },
+      {
+        key: "memoryOptimization", label: "Enable memory optimization", type: "checkbox",
+        tooltip: "Every 5 minutes, checks if JS heap usage exceeds the threshold below. If so, the oldest inactive tabs are discarded (unloaded from RAM) using Firefox's built-in tab discard. Discarded tabs stay visible in the tab bar and silently reload when clicked."
+      },
+      {
+        key: "memoryThreshold", label: "Memory threshold (%)", type: "number",
+        tooltip: "Percentage of physical RAM used by all browser processes before memory optimisation kicks in. Default is 80%. Measured via ChromeUtils.requestProcInfo() and Services.sysinfo."
+      },
+      {
+        key: "autoUnloadEnabled", label: "Auto-unload idle tabs", type: "checkbox",
+        tooltip: "When enabled, tabs that haven't been touched for longer than the delay below are automatically discarded (unloaded from RAM). The tab stays in the tab bar and reloads when you click it. Checked every minute."
+      },
+      {
+        key: "autoUnloadDelay", label: "Unload tabs idle for (seconds)", type: "number",
+        tooltip: "How long a tab must be idle (not accessed) before it is automatically unloaded. Default is 3600 (1 hour). Essential and pinned tabs are protected when the corresponding 'Never cleanup' options are on."
+      },
+      {
+        key: "keepEssentialTabs", label: "Never cleanup Essential tabs", type: "checkbox",
+        tooltip: "When enabled, Essential tabs (marked with the zen-essential attribute) are never closed by automatic cleanup, regardless of age."
+      },
+      {
+        key: "keepPinnedTabs", label: "Never cleanup Pinned tabs", type: "checkbox",
+        tooltip: "When enabled, Pinned tabs are never closed by automatic cleanup, regardless of age."
+      },
+      {
+        key: "showToolbarButton", label: "Show toolbar button", type: "checkbox",
+        tooltip: "Displays the ZenTabs toolbar button in the navigation bar. Takes effect after restarting Zen Browser."
+      },
+      {
+        key: "debugMode", label: "Debug logging", type: "checkbox",
+        tooltip: "Enables verbose logging to the browser console (Cmd+Shift+J). Useful for troubleshooting sync or cleanup issues."
+      },
     ];
 
     const dialog = doc.createElementNS("http://www.w3.org/1999/xhtml", "dialog");
     dialog.id = "zentabs-settings-dialog";
-    dialog.style.cssText = "padding:24px; min-width:480px; border-radius:8px; border:1px solid #ccc; font-family:system-ui,sans-serif;";
+    dialog.style.cssText = "padding:24px; min-width:520px; border-radius:8px; border:1px solid #ccc; font-family:system-ui,sans-serif;";
 
     const title = doc.createElementNS("http://www.w3.org/1999/xhtml", "h2");
     title.textContent = "ZenTabs Manager — Settings";
@@ -318,10 +367,21 @@ export class UIManager {
     form.style.cssText = "display:grid; grid-template-columns:1fr auto; gap:8px 16px; align-items:center;";
 
     for (const field of fields) {
-      const label = doc.createElementNS("http://www.w3.org/1999/xhtml", "label");
-      label.textContent = field.label;
-      label.setAttribute("for", `zentabs-pref-${field.key}`);
-      label.style.fontSize = "13px";
+      const labelEl = doc.createElementNS("http://www.w3.org/1999/xhtml", "label");
+      labelEl.setAttribute("for", `zentabs-pref-${field.key}`);
+      labelEl.style.cssText = "font-size:13px; display:flex; align-items:center; gap:4px; cursor:default;";
+
+      const labelText = doc.createElementNS("http://www.w3.org/1999/xhtml", "span");
+      labelText.textContent = field.label;
+      labelEl.appendChild(labelText);
+
+      if (field.tooltip) {
+        const hint = doc.createElementNS("http://www.w3.org/1999/xhtml", "span");
+        hint.textContent = "ⓘ";
+        hint.title = field.tooltip;
+        hint.style.cssText = "color:#888; font-size:11px; cursor:help; flex-shrink:0;";
+        labelEl.appendChild(hint);
+      }
 
       let input;
       if (field.type === "checkbox") {
@@ -338,15 +398,40 @@ export class UIManager {
           if (prefs[field.key] === opt) o.selected = true;
           input.appendChild(o);
         }
+      } else if (field.type === "number-with-unit") {
+        // Render number input + unit select side by side
+        input = doc.createElementNS("http://www.w3.org/1999/xhtml", "span");
+        input.style.cssText = "display:flex; align-items:center; gap:4px;";
+
+        const numInput = doc.createElementNS("http://www.w3.org/1999/xhtml", "input");
+        numInput.type = "number";
+        numInput.id = `zentabs-pref-${field.key}`;
+        numInput.value = prefs[field.key] ?? "";
+        numInput.style.cssText = "font-size:13px; padding:2px 6px; width:80px;";
+        input.appendChild(numInput);
+
+        const unitSelect = doc.createElementNS("http://www.w3.org/1999/xhtml", "select");
+        unitSelect.id = `zentabs-pref-${field.unitKey}`;
+        unitSelect.style.cssText = "font-size:13px; padding:2px 4px;";
+        for (const opt of field.unitOptions) {
+          const o = doc.createElementNS("http://www.w3.org/1999/xhtml", "option");
+          o.value = opt;
+          o.textContent = opt;
+          if (prefs[field.unitKey] === opt) o.selected = true;
+          unitSelect.appendChild(o);
+        }
+        input.appendChild(unitSelect);
       } else {
         input = doc.createElementNS("http://www.w3.org/1999/xhtml", "input");
         input.type = field.type;
         input.value = prefs[field.key] ?? "";
         input.style.cssText = "font-size:13px; padding:2px 6px; width:160px;";
       }
-      input.id = `zentabs-pref-${field.key}`;
+      if (field.type !== "number-with-unit") {
+        input.id = `zentabs-pref-${field.key}`;
+      }
 
-      form.appendChild(label);
+      form.appendChild(labelEl);
       form.appendChild(input);
     }
     dialog.appendChild(form);
@@ -368,9 +453,13 @@ export class UIManager {
       for (const field of fields) {
         const el = doc.getElementById(`zentabs-pref-${field.key}`);
         if (!el) continue;
-        if (field.type === "checkbox")   newPrefs[field.key] = el.checked;
-        else if (field.type === "number") newPrefs[field.key] = Number(el.value);
-        else                              newPrefs[field.key] = el.value;
+        if (field.type === "checkbox")        newPrefs[field.key] = el.checked;
+        else if (field.type === "number")     newPrefs[field.key] = Number(el.value);
+        else if (field.type === "number-with-unit") {
+          newPrefs[field.key] = Number(el.value);
+          const unitEl = doc.getElementById(`zentabs-pref-${field.unitKey}`);
+          if (unitEl) newPrefs[field.unitKey] = unitEl.value;
+        } else                                newPrefs[field.key] = el.value;
       }
       try {
         await this.manager.setPreferences(newPrefs);

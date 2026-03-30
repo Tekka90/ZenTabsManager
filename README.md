@@ -112,6 +112,11 @@ await ZenTabsAPI.syncBidirectional();
 await ZenTabsAPI.cleanupOldTabs({ maxAge: 7, dryRun: false });
 await ZenTabsAPI.optimizeMemory({ force: true });
 
+// Pause / resume all background activity
+ZenTabsAPI.pause();
+ZenTabsAPI.resume();
+ZenTabsAPI.isPaused(); // → true / false
+
 // Statistics
 const stats = await ZenTabsAPI.getStatistics();
 console.log(stats);
@@ -122,14 +127,13 @@ const json = await ZenTabsAPI.exportToJSON();
 
 ### Preferences
 
-The mod loads preferences from `engine.json`. To change settings:
+To change settings:
 
 1. Click the toolbar button → **Settings**
-2. Or edit `engine.json` and restart Zen
-3. Or modify via localStorage:
+2. Or modify via the API:
 
 ```javascript
-ZenTabsManager.setPreferences({
+await ZenTabsAPI.setPreferences({
   syncEnabled: true,
   syncDirection: 'bidirectional',
   cleanupAge: 14,
@@ -145,38 +149,38 @@ All preferences with defaults:
 |------------|---------|-------------|
 | `enabled` | `true` | Master switch for all features |
 | `syncEnabled` | `true` | Enable bookmark sync |
-| `syncDirection` | `bidirectional` | Sync direction: `tabs-to-bookmarks`, `bookmarks-to-tabs`, `bidirectional` |
-| `syncInterval` | `300` | Auto-sync interval in seconds (0 = manual only) |
-| `cleanupEnabled` | `false` | Enable automatic cleanup |
-| `cleanupAge` | `7` | Close tabs older than N days |
+| `syncDirection` | `"bidirectional"` | `"toBookmarks"`, `"fromBookmarks"`, or `"bidirectional"` |
+| `syncInterval` | `300` | Auto-sync interval in seconds |
+| `syncCloseRemovedTabs` | `false` | Close tabs removed from bookmarks during sync |
+| `paused` | `false` | Whether the manager is currently paused |
+| `cleanupEnabled` | `false` | Enable automatic age-based cleanup |
+| `cleanupAge` | `7` | Close tabs older than N (in `cleanupAgeUnit` units) |
+| `cleanupAgeUnit` | `"days"` | Unit for `cleanupAge`: `"hours"` or `"days"` |
 | `cleanupExcludeDomains` | `""` | Comma-separated domains to protect |
-| `memoryOptimization` | `true` | Enable memory optimization |
-| `memoryThreshold` | `80` | Unload tabs when memory > N% |
-| `keepEssentialTabs` | `true` | Never cleanup/unload Essential tabs |
-| `keepPinnedTabs` | `true` | Never cleanup Pinned tabs |
-| `showToolbarButton` | `true` | Show toolbar button |
-| `debugMode` | `false` | Enable debug logging |
+| `memoryOptimization` | `true` | Enable memory-threshold-based tab unloading |
+| `memoryThreshold` | `80` | Unload tabs when memory usage > N% |
+| `autoUnloadEnabled` | `false` | Enable time-based idle tab unloading |
+| `autoUnloadDelay` | `3600` | Seconds of inactivity before a tab is unloaded |
+| `keepEssentialTabs` | `true` | Never close/unload Essential tabs |
+| `keepPinnedTabs` | `true` | Never close/unload Pinned tabs |
+| `showToolbarButton` | `true` | Show toolbar button in `#nav-bar` |
+| `debugMode` | `false` | Enable verbose debug logging |
 
 ## 📂 Project Structure
 
 ```
 zentabs-manager/
-├── engine.json              # Sine mod manifest with preferences
+├── theme.json              # Sine mod manifest (id, name, version, entry point)
 ├── engine/
-│   ├── sine.api.mjs        # Public API definitions
-│   └── sine.sys.mjs         # System integration & initialization
+│   ├── zen.sys.mjs         # Entry point: ZenTabsManager class, init, lifecycle
+│   └── zen.api.mjs         # Public API (ZenTabsAPI) exposed on window
 ├── content/
-│   ├── TabManager.mjs       # Tab enumeration & metadata
-│   ├── SyncManager.mjs      # Bi-directional bookmark sync
-│   ├── CleanupManager.mjs   # Cleanup & memory optimization
-│   ├── UI.mjs               # Toolbar button & keyboard shortcuts
-│   └── browser.mjs          # Browser integration layer
-├── icons/                   # Mod icons (for future)
-├── install-sine-mod.sh      # One-command installer
-├── README.md                # This file (complete documentation)
-├── QUICKSTART.md            # Quick start guide
-├── WHATS-BUILT.md           # Architecture overview
-└── archive/                 # Old implementations (userChrome.js)
+│   ├── TabManager.mjs      # Tab enumeration, metadata cache, filtering
+│   ├── SyncManager.mjs     # Bi-directional bookmark sync via PlacesUtils
+│   ├── CleanupManager.mjs  # Age-based cleanup and memory optimization
+│   └── UI.mjs              # Toolbar button (XUL), dropdown menu, keyboard shortcuts
+├── README.md               # This file
+└── INSTALL.md              # Installation guide
 ```
 
 ## 🔧 Architecture
@@ -185,12 +189,12 @@ zentabs-manager/
 
 The mod is built with a clean separation of concerns:
 
-1. **sine.sys.mjs**: Initializes all managers, handles lifecycle
+1. **zen.sys.mjs**: Initializes all managers per chrome window, handles lifecycle
 2. **TabManager**: Core tab operations and metadata extraction
-3. **SyncManager**: Bookmark synchronization logic
-4. **CleanupManager**: Cleanup and memory optimization
+3. **SyncManager**: Manifest-based 3-way bookmark sync
+4. **CleanupManager**: Age-based cleanup, memory optimization, and idle tab unloading
 5. **UIManager**: User interface components
-6. **sine.api.mjs**: Public API for other mods/scripts
+6. **zen.api.mjs**: Public API (`ZenTabsAPI`) exposed on the chrome window
 
 ### Event System
 
@@ -208,16 +212,16 @@ ZenTabsManager.on('memory-optimized', (result) => console.log(result));
 ### Mod Not Loading
 
 1. Check Sine is enabled in Zen
-2. Verify folder is in correct location: `~/Library/Application Support/zen/mods/zentabs-manager/`
+2. Verify folder is in correct location: `~/Library/Application Support/zen/Profiles/xxx.Default (release)/chrome/sine-mods/zentabs-manager/`
 3. Check Browser Console for errors: `Cmd+Shift+J`
-4. Try fallback installation: `./install-permanent.sh`
+4. See [INSTALL.md](INSTALL.md) for full troubleshooting steps
 
 ### Features Not Working
 
 1. Open Browser Console: `Cmd+Shift+J`
 2. Check for initialization message
 3. Verify API is available: `typeof ZenTabsAPI`
-4. Enable debug mode: `ZenTabsManager.setPreferences({ debugMode: true })`
+4. Enable debug mode: `await ZenTabsAPI.setPreferences({ debugMode: true })`
 
 ### Sync Issues
 
@@ -231,7 +235,7 @@ ZenTabsManager.on('memory-optimized', (result) => console.log(result));
 | Feature | userChrome.js | Sine Mod |
 |---------|---------------|----------|
 | GUI Integration | Manual buttons | Native toolbar button |
-| Settings Panel | No | Yes (via engine.json) |
+| Settings Panel | No | Yes (via toolbar button or API) |
 | Auto-loading | Manual setup | Automatic |
 | Preferences | localStorage | Sine preferences system |
 | Modularity | Single file | Clean module structure |
@@ -245,7 +249,6 @@ ZenTabsManager.on('memory-optimized', (result) => console.log(result));
 - [ ] Real-time tab monitoring panel
 - [ ] Custom sync schedules per folder
 - [ ] Tab session restoration
-- [ ] Integration with Zen workspaces
 - [ ] Export/import sync profiles
 - [ ] Graphical statistics dashboard
 - [ ] Cloud backup integration
@@ -262,9 +265,9 @@ To modify the mod:
 ### Adding New Features
 
 1. Add new manager in `content/NewManager.mjs`
-2. Initialize in `sine.sys.mjs`
-3. Export methods in `sine.api.mjs`
-4. Add UI elements in `UI.mjs`
+2. Initialize in `engine/zen.sys.mjs`
+3. Export methods in `engine/zen.api.mjs`
+4. Add UI elements in `content/UI.mjs`
 
 ## 📄 License
 

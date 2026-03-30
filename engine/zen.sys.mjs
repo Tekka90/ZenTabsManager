@@ -135,7 +135,7 @@ class ZenTabsManager {
   }
 
   startBackgroundTasks() {
-    const { syncEnabled, syncInterval, cleanupEnabled, memoryOptimization } = this.preferences;
+    const { syncEnabled, syncInterval, cleanupEnabled, memoryOptimization, autoUnloadEnabled } = this.preferences;
     
     if (syncEnabled && syncInterval > 0) {
       this.syncInterval = this.window.setInterval(() => 
@@ -151,6 +151,12 @@ class ZenTabsManager {
       this.memoryInterval = this.window.setInterval(() => 
         this.cleanupManager.checkMemoryUsage(), 300 * 1000);
     }
+
+    if (autoUnloadEnabled) {
+      // Check every minute; actual threshold is compared inside
+      this.autoUnloadInterval = this.window.setInterval(() =>
+        this.cleanupManager.unloadStaleTabs(), 60 * 1000);
+    }
   }
 
   async loadPreferences() {
@@ -163,9 +169,12 @@ class ZenTabsManager {
       paused: false,
       cleanupEnabled: false,
       cleanupAge: 7,
+      cleanupAgeUnit: "days",
       cleanupExcludeDomains: "",
       memoryOptimization: true,
       memoryThreshold: 80,
+      autoUnloadEnabled: false,
+      autoUnloadDelay: 3600,
       keepEssentialTabs: true,
       keepPinnedTabs: true,
       showToolbarButton: true,

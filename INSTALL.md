@@ -130,7 +130,7 @@ Then edit `chrome/sine-mods/mods.json` to remove the `zentabs-manager` entry.
 
 ## Security Note
 
-Enabling "External marketplace" allows Sine to load JavaScript fr third-party sources. Only install mods from sources you trust. Review the code in `engine/` before installation if you have security concerns.
+Enabling "External marketplace" allows Sine to load JavaScript from third-party sources. Only install mods from sources you trust. Review the code in `engine/` before installation if you have security concerns.
 
 ## Support
 

@@ -179,6 +179,203 @@ describe("getWorkspaceInfo", () => {
   });
 });
 
+// ── getTabState ───────────────────────────────────────────────────────────
+
+describe("getTabState", () => {
+  test("active tab includes 'active'", () => {
+    const tab = makeTab({ selected: true });
+    const tm = new TabManager(makeManager());
+    assert.ok(tm.getTabState(tab).includes("active"));
+  });
+
+  test("pending tab includes 'pending'", () => {
+    const tab = makeTab({ attrs: { pending: "" } });
+    const tm = new TabManager(makeManager());
+    assert.ok(tm.getTabState(tab).includes("pending"));
+  });
+
+  test("discarded tab includes 'discarded'", () => {
+    const tab = makeTab({ attrs: { discarded: "" } });
+    const tm = new TabManager(makeManager());
+    assert.ok(tm.getTabState(tab).includes("discarded"));
+  });
+
+  test("muted tab includes 'muted'", () => {
+    const tab = makeTab({ muted: true });
+    const tm = new TabManager(makeManager());
+    assert.ok(tm.getTabState(tab).includes("muted"));
+  });
+
+  test("idle tab returns ['loaded']", () => {
+    const tab = makeTab({});
+    const tm = new TabManager(makeManager());
+    assert.deepEqual(tm.getTabState(tab), ["loaded"]);
+  });
+});
+
+// ── getFolderPath ─────────────────────────────────────────────────────────
+
+describe("getFolderPath", () => {
+  test("returns null when tab has no group", () => {
+    const tab = makeTab({ group: null });
+    const tm = new TabManager(makeManager());
+    assert.equal(tm.getFolderPath(tab), null);
+  });
+
+  test("returns null when group is not a Zen folder", () => {
+    const tab = makeTab({ group: { isZenFolder: false, label: "not a folder" } });
+    const tm = new TabManager(makeManager());
+    assert.equal(tm.getFolderPath(tab), null);
+  });
+
+  test("returns single-level folder path", () => {
+    const tab = makeTab({ group: { isZenFolder: true, label: "Work", group: null } });
+    const tm = new TabManager(makeManager());
+    assert.deepEqual(tm.getFolderPath(tab), ["Work"]);
+  });
+
+  test("returns nested folder path in order", () => {
+    const tab = makeTab({
+      group: {
+        isZenFolder: true, label: "Projects",
+        group: { isZenFolder: true, label: "Work", group: null }
+      }
+    });
+    const tm = new TabManager(makeManager());
+    assert.deepEqual(tm.getFolderPath(tab), ["Work", "Projects"]);
+  });
+
+  test("uses 'Unnamed Folder' when label is missing", () => {
+    const tab = makeTab({ group: { isZenFolder: true, label: "", group: null } });
+    const tm = new TabManager(makeManager());
+    assert.deepEqual(tm.getFolderPath(tab), ["Unnamed Folder"]);
+  });
+});
+
+// ── getTabsFiltered: state filter ─────────────────────────────────────────
+
+describe("getTabsFiltered — state filter", () => {
+  test("filter by state=active", async () => {
+    const activeTab = makeTab({ url: "https://active.com", selected: true });
+    const idleTab   = makeTab({ url: "https://idle.com" });
+    const mgr = makeManager({ tabs: [activeTab, idleTab] });
+    const tm = new TabManager(mgr);
+    await tm.rebuildCache();
+    const results = await tm.getTabsFiltered({ state: "active" });
+    assert.equal(results.length, 1);
+    assert.equal(results[0].url, "https://active.com");
+  });
+
+  test("filter by state=discarded", async () => {
+    const discarded = makeTab({ url: "https://disc.com", attrs: { discarded: "" } });
+    const normal    = makeTab({ url: "https://norm.com" });
+    const mgr = makeManager({ tabs: [discarded, normal] });
+    const tm = new TabManager(mgr);
+    await tm.rebuildCache();
+    const results = await tm.getTabsFiltered({ state: "discarded" });
+    assert.equal(results.length, 1);
+    assert.equal(results[0].url, "https://disc.com");
+  });
+});
+
+// ── getTabsFiltered: folder filter ────────────────────────────────────────
+
+describe("getTabsFiltered — folder filter", () => {
+  test("filter by folder name", async () => {
+    const folderTab = makeTab({ url: "https://in-folder.com", group: { isZenFolder: true, label: "Dev", group: null } });
+    const plainTab  = makeTab({ url: "https://no-folder.com" });
+    const mgr = makeManager({ tabs: [folderTab, plainTab] });
+    const tm = new TabManager(mgr);
+    await tm.rebuildCache();
+    const results = await tm.getTabsFiltered({ folder: "Dev" });
+    assert.equal(results.length, 1);
+    assert.equal(results[0].url, "https://in-folder.com");
+  });
+});
+
+// ── getStatistics ─────────────────────────────────────────────────────────
+
+describe("getStatistics", () => {
+  test("counts tabs by type correctly", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const essential = makeTab({ url: "https://ess.com", attrs: { "zen-essential": "", "zen-workspace-id": ws.uuid } });
+    const pinned    = makeTab({ url: "https://pin.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    const normal    = makeTab({ url: "https://nor.com", attrs: { "zen-workspace-id": ws.uuid } });
+    const mgr = makeManager({ workspaces: [ws], tabs: [essential, pinned, normal] });
+    const tm = new TabManager(mgr);
+    await tm.rebuildCache();
+
+    const stats = await tm.getStatistics();
+    assert.equal(stats.total, 3);
+    assert.equal(stats.byType.essential, 1);
+    assert.equal(stats.byType.pinned, 1);
+    assert.equal(stats.byType.normal, 1);
+  });
+
+  test("counts tabs per space", async () => {
+    const ws1 = makeWorkspace("Work",     "uuid-work");
+    const ws2 = makeWorkspace("Personal", "uuid-personal");
+    const t1 = makeTab({ url: "https://a.com", attrs: { "zen-workspace-id": ws1.uuid } });
+    const t2 = makeTab({ url: "https://b.com", attrs: { "zen-workspace-id": ws2.uuid } });
+    const mgr = makeManager({ workspaces: [ws1, ws2], tabs: [t1, t2] });
+    const tm = new TabManager(mgr);
+    await tm.rebuildCache();
+
+    const stats = await tm.getStatistics();
+    assert.equal(stats.spaces, 2);
+    assert.equal(stats.bySpace["Work"].total, 1);
+    assert.equal(stats.bySpace["Personal"].total, 1);
+  });
+
+  test("counts tabs in folders", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const inFolder = makeTab({ url: "https://a.com", attrs: { "zen-workspace-id": ws.uuid }, group: { isZenFolder: true, label: "Dev", group: null } });
+    const noFolder = makeTab({ url: "https://b.com", attrs: { "zen-workspace-id": ws.uuid } });
+    const mgr = makeManager({ workspaces: [ws], tabs: [inFolder, noFolder] });
+    const tm = new TabManager(mgr);
+    await tm.rebuildCache();
+
+    const stats = await tm.getStatistics();
+    assert.equal(stats.inFolders, 1);
+    assert.equal(stats.folders, 1); // 1 unique folder name
+  });
+});
+
+// ── Event handlers ────────────────────────────────────────────────────────
+
+describe("Event handlers", () => {
+  test("onTabCreated adds tab to cache", () => {
+    const mgr = makeManager();
+    const tm = new TabManager(mgr);
+    const tab = makeTab({ url: "https://new.com" });
+    tm.onTabCreated(tab);
+    assert.ok(tm.tabMetadataCache.has(tab));
+  });
+
+  test("onTabRemoved removes tab from cache", () => {
+    const mgr = makeManager();
+    const tm = new TabManager(mgr);
+    const tab = makeTab({ url: "https://gone.com" });
+    tm.onTabCreated(tab);
+    assert.ok(tm.tabMetadataCache.has(tab));
+    tm.onTabRemoved(tab);
+    assert.ok(!tm.tabMetadataCache.has(tab));
+  });
+
+  test("onTabUpdated refreshes cache entry", () => {
+    const mgr = makeManager();
+    const tm = new TabManager(mgr);
+    const tab = makeTab({ url: "https://updated.com" });
+    tm.onTabCreated(tab);
+    const before = tm.tabMetadataCache.get(tab);
+    // Simulate URL change
+    tab.linkedBrowser.currentURI.spec = "https://updated.com/new-path";
+    tm.onTabUpdated(tab);
+    const after = tm.tabMetadataCache.get(tab);
+    assert.equal(after.url, "https://updated.com/new-path");
+  });
+});
+
 // ── getTabAge ────────────────────────────────────────────────────────────
 
 describe("getTabAge", () => {
