@@ -163,6 +163,7 @@ class ZenTabsManager {
       syncEnabled: true,
       syncDirection: "bidirectional",
       syncInterval: 300,
+      syncCloseRemovedTabs: false,
       cleanupEnabled: false,
       cleanupAge: 7,
       cleanupExcludeDomains: "",

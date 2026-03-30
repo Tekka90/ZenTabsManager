@@ -272,6 +272,7 @@ export class UIManager {
       { key: "syncEnabled",           label: "Enable bookmark sync",          type: "checkbox" },
       { key: "syncDirection",          label: "Sync direction",                type: "select",   options: ["tabs-to-bookmarks", "bookmarks-to-tabs", "bidirectional"] },
       { key: "syncInterval",           label: "Auto-sync interval (seconds, 0 = manual)", type: "number" },
+      { key: "syncCloseRemovedTabs",   label: "Close tabs deleted on another computer (bidirectional)", type: "checkbox" },
       { key: "cleanupEnabled",         label: "Enable automatic cleanup",      type: "checkbox" },
       { key: "cleanupAge",             label: "Close tabs older than (days)",  type: "number" },
       { key: "cleanupExcludeDomains",  label: "Exclude domains (comma-separated)", type: "text" },
