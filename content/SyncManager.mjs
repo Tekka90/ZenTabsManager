@@ -447,7 +447,9 @@ export class SyncManager {
       if (!tab) { result.errors++; return; }
       tab.setAttribute("zen-workspace-id", spaceUuid);
       if (tabType === "essential") {
-        tab.setAttribute("zen-essential", "");
+        tab.setAttribute("zen-essential", "true");
+        tab.removeAttribute("zen-workspace-id"); // essentials are workspace-agnostic
+        gBrowser.pinTab(tab);
       } else if (tabType === "pinned") {
         gBrowser.pinTab(tab);
       }

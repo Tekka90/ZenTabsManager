@@ -436,7 +436,8 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     assert.equal(r.tabsCreated, 1);
     const tab = mgr.window.gBrowser.tabs[0];
     assert.ok(tab.hasAttribute("zen-essential"), "tab should have zen-essential attribute");
-    assert.equal(tab.pinned, false);
+    assert.equal(tab.pinned, true, "essential tabs are pinned in Zen");
+    assert.ok(!tab.hasAttribute("zen-workspace-id"), "essential tabs have no workspace-id");
   });
 
   test("bookmark in space root → tab is pinned", async () => {
