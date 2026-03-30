@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Editor
+.vscode/
+*.swp
+*.swo

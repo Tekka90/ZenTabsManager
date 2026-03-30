@@ -49,7 +49,7 @@ ZenTabsManager/
     └── UI.mjs              # Toolbar button (XUL), dropdown menu, keyboard shortcuts
 ```
 
-> **Note:** The README references files like `sine.api.mjs`, `browser.mjs`, `install-sine-mod.sh`, and directories like `archive/` that do not currently exist. The actual manifest is `theme.json`, not `engine.json`.
+> **Note:** The actual manifest is `theme.json`, not `engine.json`. Files like `sine.api.mjs`, `browser.mjs`, `install-sine-mod.sh`, and directories like `archive/` do not exist.
 
 ## Architecture
 

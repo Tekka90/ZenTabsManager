@@ -36,16 +36,12 @@ Without this setting, Sine will only load CSS and ignore all JavaScript files!
 
 #### Option B: Manual Installation (For Development)
 
-Use the provided installer script:
-
-```bash
-./install-sine.sh
-```
-
-This will:
-- Check if Sine is installed
-- Copy files to `~/.../chrome/sine-mods/zentabs-manager/`
-- Register mod in `mods.json`
+1. Copy the repo folder to:
+   ```
+   ~/Library/Application Support/zen/Profiles/xxx.Default (release)/chrome/sine-mods/zentabs-manager/
+   ```
+2. Edit `chrome/sine-mods/mods.json` to add an entry for `zentabs-manager`.
+3. Restart Zen Browser.
 
 ### 3. Verify Installation
 

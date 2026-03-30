@@ -58,10 +58,7 @@ Via Sine's built-in installer:
 
 ### Manual Install (Development)
 
-```bash
-cd /path/to/ZenTabsManager
-./install-sine.sh
-```
+Copy the repo folder into your Zen profile's `chrome/sine-mods/` directory and register it in `mods.json`. See [INSTALL.md](INSTALL.md) for the exact path and steps.
 
 **📖 For detailed instructions, troubleshooting, and requirements, see [INSTALL.md](INSTALL.md)**
 
