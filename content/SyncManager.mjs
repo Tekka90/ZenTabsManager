@@ -320,33 +320,80 @@ export class SyncManager {
 
   /**
    * Bookmarks-are-authority: open tabs for bookmarks not already open.
+   *
+   * Walks the Zen/ bookmark folder directly.  If a space folder's name doesn't
+   * match any currently-existing Zen Space (e.g. fresh install), the space is
+   * created automatically via gZenWorkspaces.createAndSaveWorkspace so that the
+   * restored tabs land in the right Space.
    */
   async syncFromBookmarks() {
     this.log("Syncing bookmarks → tabs...");
 
-    const result = { bookmarksFound: 0, tabsCreated: 0, tabsExisting: 0, errors: 0 };
+    const result = { spacesCreated: 0, bookmarksFound: 0, tabsCreated: 0, tabsExisting: 0, errors: 0 };
+
+    const PlacesUtils    = this.manager.window.PlacesUtils;
+    const gZenWorkspaces = this.manager.window.gZenWorkspaces;
+    const { gBrowser }   = this.manager.window;
 
     const existingUrls = new Set(
       (await this.manager.tabManager.getAllTabs()).map(t => t.url)
     );
 
-    const bmBySpace = await this.getBookmarkUrlsBySpace();
+    // Build a name → uuid lookup for all existing spaces
+    const spaceByName = new Map();
+    if (gZenWorkspaces) {
+      for (const ws of gZenWorkspaces.getWorkspaces()) {
+        spaceByName.set(ws.name, ws.uuid);
+      }
+    }
 
-    for (const [spaceUuid, urlMap] of bmBySpace) {
-      if (spaceUuid === null) continue; // skip unrecognised space folders
-      result.bookmarksFound += urlMap.size;
-      for (const [url] of urlMap) {
-        if (existingUrls.has(url)) { result.tabsExisting++; continue; }
+    // Walk Zen/ folder directly so we can create missing spaces on the fly
+    const toolbarGuid  = PlacesUtils.bookmarks.toolbarGuid;
+    const zenFolderGuid = await this.getOrCreateFolder(toolbarGuid, "Zen");
+    const zenTree = await PlacesUtils.promiseBookmarksTree(zenFolderGuid, { includeItemIds: false });
+    if (!zenTree || !zenTree.children) return result;
+
+    for (const spaceFolder of zenTree.children) {
+      if (spaceFolder.type !== PlacesUtils.bookmarks.TYPE_FOLDER) continue;
+      const folderName = spaceFolder.title;
+
+      // Look up existing space by name, or create it if it doesn't exist yet
+      let spaceUuid = spaceByName.get(folderName);
+      if (!spaceUuid && gZenWorkspaces?.createAndSaveWorkspace) {
         try {
-          const tab = this.manager.window.gBrowser.addTab(url, {
+          await gZenWorkspaces.createAndSaveWorkspace(folderName, null, /* dontChange */ true);
+          // Re-read the workspace list to find the newly created UUID
+          for (const ws of gZenWorkspaces.getWorkspaces()) {
+            if (ws.name === folderName) {
+              spaceUuid = ws.uuid;
+              spaceByName.set(folderName, spaceUuid);
+              result.spacesCreated++;
+              break;
+            }
+          }
+        } catch (e) {
+          console.error(`[ZenTabs] Failed to create space "${folderName}":`, e);
+        }
+      }
+
+      if (!spaceUuid) continue; // gZenWorkspaces unavailable or creation failed
+
+      const bookmarks = await this.getAllBookmarksInFolder(spaceFolder.guid);
+      result.bookmarksFound += bookmarks.length;
+
+      for (const bm of bookmarks) {
+        if (!bm.url) continue;
+        if (existingUrls.has(bm.url)) { result.tabsExisting++; continue; }
+        try {
+          const tab = gBrowser.addTab(bm.url, {
             inBackground: true,
             triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
           });
           if (tab) tab.setAttribute("zen-workspace-id", spaceUuid);
           result.tabsCreated++;
-          existingUrls.add(url);
+          existingUrls.add(bm.url);
         } catch (e) {
-          console.error(`[ZenTabs] Error opening tab for ${url}:`, e);
+          console.error(`[ZenTabs] Error opening tab for ${bm.url}:`, e);
           result.errors++;
         }
       }

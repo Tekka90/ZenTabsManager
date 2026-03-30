@@ -406,6 +406,57 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     const newTab = mgr.window.gBrowser.tabs[0];
     assert.equal(newTab.getAttribute("zen-workspace-id"), ws.uuid);
   });
+
+  test("fresh install — no spaces — creates the space and opens tabs", async () => {
+    // No workspaces configured at all (e.g. first boot after restoring bookmarks)
+    const mgr = makeManager({ workspaces: [], tabs: [] });
+
+    // Seed bookmarks manually under one Zen/Personal folder
+    const PlacesUtils = mgr.window.PlacesUtils;
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenFolder  = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const spaceFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid, type: "folder", title: "Personal" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceFolder.guid, type: "bookmark", title: "Example", url: "https://example.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    const r = await sync.syncFromBookmarks();
+
+    assert.equal(r.spacesCreated, 1, "should have created the missing space");
+    assert.equal(r.tabsCreated, 1,   "should have opened the bookmarked tab");
+    assert.equal(mgr.window.gBrowser.tabs.length, 1);
+
+    // The created space should have the right name
+    const spaces = mgr.window.gZenWorkspaces.getWorkspaces();
+    assert.equal(spaces.length, 1);
+    assert.equal(spaces[0].name, "Personal");
+
+    // The tab should be assigned to the new space
+    const newTab = mgr.window.gBrowser.tabs[0];
+    assert.equal(newTab.getAttribute("zen-workspace-id"), spaces[0].uuid);
+  });
+
+  test("fresh install — multiple space folders — creates all spaces and opens all tabs", async () => {
+    const mgr = makeManager({ workspaces: [], tabs: [] });
+
+    const PlacesUtils = mgr.window.PlacesUtils;
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenFolder  = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const workFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid, type: "folder", title: "Work" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: workFolder.guid, type: "bookmark", title: "Work", url: "https://work.com" });
+    const persFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid, type: "folder", title: "Personal" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: persFolder.guid, type: "bookmark", title: "Personal", url: "https://personal.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    const r = await sync.syncFromBookmarks();
+
+    assert.equal(r.spacesCreated, 2, "should have created 2 spaces");
+    assert.equal(r.tabsCreated, 2,   "should have opened 2 tabs");
+    assert.equal(mgr.window.gZenWorkspaces.getWorkspaces().length, 2);
+  });
 });
 
 // ── getOrCreateFolder ─────────────────────────────────────────────────────

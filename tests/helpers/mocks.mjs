@@ -179,12 +179,20 @@ export function makeGBrowser(tabs = []) {
 
 export function makeGZenWorkspaces(workspaces = [], allTabs = []) {
   const byUuid = new Map(workspaces.map(ws => [ws.uuid, ws]));
+  let _counter = 1;
   return {
     getWorkspaces: ()           => workspaces,
     getWorkspaceFromId: (uuid)  => byUuid.get(uuid) ?? null,
     isWorkspaceActive: (ws)     => false,
     get activeWorkspace()       { return workspaces[0]?.uuid ?? null; },
     get allStoredTabs()         { return allTabs; },
+    async createAndSaveWorkspace(name, icon = null, dontChange = false, containerTabId = 0) {
+      const uuid = `uuid-created-${_counter++}`;
+      const ws = { uuid, name, icon, theme: {}, containerTabId };
+      workspaces.push(ws);
+      byUuid.set(uuid, ws);
+      return ws;
+    },
   };
 }
 
