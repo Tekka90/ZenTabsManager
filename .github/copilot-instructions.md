@@ -145,19 +145,19 @@ Bookmarks are organized under a **`Zen/`** root folder, then by space name, then
 ```
 Zen/
 └── <SpaceName>/
-    ├── Pinned/                ← ALL pinned tabs (no Zen folder)
-    ├── Pinned/<ZenFolder>/    ← pinned tabs that were inside a Zen folder
+    ├── <direct bookmark>      ← pinned tab with no Zen folder
+    ├── <FolderName>/          ← pinned tab WITH a Zen folder (folder IS the Zen folder)
     ├── Essentials/            ← essential tabs with no Zen folder
-    ├── <ZenFolderName>/       ← essential tabs inside a Zen folder
     └── Temporary tabs/        ← normal tabs with no Zen folder
 ```
 
-This structure makes tab type fully recoverable on restore:
-- `Pinned/` (and sub-paths) → pinned
-- `Essentials/` → essential
-- Named folders → essential (only essentials get synced by default for non-pinned)
-- Space root → pinned (legacy fallback for bookmarks saved before this scheme)
-- `Temporary tabs/` → normal
+Type is fully recoverable on restore:
+- Direct bookmark in space root → `pinned`, no Zen folder
+- Named subfolder (not `Essentials` / `Temporary tabs`) → `pinned`, Zen folder = folder name
+- `Essentials/` subfolder → `essential`
+- `Temporary tabs/` subfolder → `normal`
+
+`getBookmarkFolderForTab(spaceFolderGuid, tabData)` resolves or creates the correct subfolder for any given tab.
 
 ### Tab Classification
 
