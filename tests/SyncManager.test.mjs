@@ -407,6 +407,67 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     assert.equal(newTab.getAttribute("zen-workspace-id"), ws.uuid);
   });
 
+  test("active workspace is restored after sync completes", async () => {
+    const ws1 = makeWorkspace("Work",     "uuid-work");
+    const ws2 = makeWorkspace("Personal", "uuid-personal");
+    const mgr = makeManager({ workspaces: [ws1, ws2], tabs: [] });
+    await seedBookmark(mgr.window.PlacesUtils, ws2.name, "https://example.com");
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    // Active workspace starts as ws1 (first in list)
+    assert.equal(mgr.window.gZenWorkspaces.activeWorkspace, ws1.uuid);
+
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    // Should be restored to ws1, not left on ws2
+    assert.equal(mgr.window.gZenWorkspaces.activeWorkspace, ws1.uuid);
+  });
+
+  test("Essentials subfolder → tab gets zen-essential attribute", async () => {
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://essential.com", "Essential", "Essentials");
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    const r = await sync.syncFromBookmarks();
+
+    assert.equal(r.tabsCreated, 1);
+    const tab = mgr.window.gBrowser.tabs[0];
+    assert.ok(tab.hasAttribute("zen-essential"), "tab should have zen-essential attribute");
+    assert.equal(tab.pinned, false);
+  });
+
+  test("bookmark in space root → tab is pinned", async () => {
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    // No subFolder → lands directly in the space root
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://pinned.com");
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const tab = mgr.window.gBrowser.tabs[0];
+    assert.equal(tab.pinned, true, "tab should be pinned");
+    assert.ok(!tab.hasAttribute("zen-essential"));
+  });
+
+  test("named Zen folder bookmark → tab is normal (not pinned or essential)", async () => {
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://foldered.com", "Foldered", "My Projects");
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const tab = mgr.window.gBrowser.tabs[0];
+    assert.equal(tab.pinned, false, "tab in Zen folder should not be pinned");
+    assert.ok(!tab.hasAttribute("zen-essential"), "tab in Zen folder should not be essential");
+  });
+
   test("fresh install — no spaces — creates the space and opens tabs", async () => {
     // No workspaces configured at all (e.g. first boot after restoring bookmarks)
     const mgr = makeManager({ workspaces: [], tabs: [] });

@@ -326,8 +326,17 @@ export class SyncManager {
    *
    * Walks the Zen/ bookmark folder directly.  If a space folder's name doesn't
    * match any currently-existing Zen Space (e.g. fresh install), the space is
-   * created automatically via gZenWorkspaces.createAndSaveWorkspace so that the
-   * restored tabs land in the right Space.
+   * created automatically via gZenWorkspaces.createAndSaveWorkspace.
+   *
+   * Tab type is inferred from the bookmark's containing sub-folder:
+   *   • Bookmark directly in the space root       → pinned (no Zen folder)
+   *   • Inside "Essentials/" sub-folder           → essential
+   *   • Inside "Temporary tabs/" sub-folder       → normal
+   *   • Inside any other named sub-folder         → normal (Zen folder, type lost)
+   *
+   * Before opening tabs for a space we call changeWorkspaceWithID() so Zen
+   * places the new tabs in the correct workspace.  The previously active
+   * workspace is restored afterwards.
    */
   async syncFromBookmarks() {
     this.log("Syncing bookmarks → tabs...");
@@ -336,13 +345,12 @@ export class SyncManager {
 
     const PlacesUtils    = this.manager.window.PlacesUtils;
     const gZenWorkspaces = this.manager.window.gZenWorkspaces;
-    const { gBrowser }   = this.manager.window;
 
     const existingUrls = new Set(
       (await this.manager.tabManager.getAllTabs()).map(t => t.url)
     );
 
-    // Build a name → uuid lookup for all existing spaces
+    // Build name → uuid lookup for all existing spaces
     const spaceByName = new Map();
     if (gZenWorkspaces) {
       for (const ws of gZenWorkspaces.getWorkspaces()) {
@@ -350,24 +358,23 @@ export class SyncManager {
       }
     }
 
-    // Walk Zen/ folder directly so we can create missing spaces on the fly
-    const toolbarGuid  = PlacesUtils.bookmarks.toolbarGuid;
+    const toolbarGuid   = PlacesUtils.bookmarks.toolbarGuid;
     const zenFolderGuid = await this.getOrCreateFolder(toolbarGuid, "Zen");
     const zenTree = await PlacesUtils.promiseBookmarksTree(zenFolderGuid, { includeItemIds: false });
     if (!zenTree || !zenTree.children) return result;
 
+    // Remember current workspace so we can restore it when done
+    const previousWorkspace = gZenWorkspaces?.activeWorkspace ?? null;
+
     for (const spaceFolder of zenTree.children) {
-      // Use uri == null to detect folders — promiseBookmarksTree integer types
-      // don't match PlacesUtils.bookmarks.TYPE_FOLDER string constant.
-      if (spaceFolder.uri != null) continue;
+      if (spaceFolder.uri != null) continue; // skip plain bookmarks / separators
       const folderName = spaceFolder.title;
 
-      // Look up existing space by name, or create it if it doesn't exist yet
+      // Look up or create the matching Zen Space
       let spaceUuid = spaceByName.get(folderName);
       if (!spaceUuid && gZenWorkspaces?.createAndSaveWorkspace) {
         try {
           await gZenWorkspaces.createAndSaveWorkspace(folderName, null, /* dontChange */ true);
-          // Re-read the workspace list to find the newly created UUID
           for (const ws of gZenWorkspaces.getWorkspaces()) {
             if (ws.name === folderName) {
               spaceUuid = ws.uuid;
@@ -381,30 +388,69 @@ export class SyncManager {
         }
       }
 
-      if (!spaceUuid) continue; // gZenWorkspaces unavailable or creation failed
+      if (!spaceUuid) continue;
 
-      const bookmarks = await this.getAllBookmarksInFolder(spaceFolder.guid);
-      result.bookmarksFound += bookmarks.length;
+      // Switch to this workspace BEFORE opening tabs so Zen assigns them here
+      if (gZenWorkspaces?.changeWorkspaceWithID) {
+        try { await gZenWorkspaces.changeWorkspaceWithID(spaceUuid); } catch (e) { /* non-fatal */ }
+      }
 
-      for (const bm of bookmarks) {
-        if (!bm.url) continue;
-        if (existingUrls.has(bm.url)) { result.tabsExisting++; continue; }
-        try {
-          const tab = gBrowser.addTab(bm.url, {
-            inBackground: true,
-            triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
-          });
-          if (tab) tab.setAttribute("zen-workspace-id", spaceUuid);
-          result.tabsCreated++;
-          existingUrls.add(bm.url);
-        } catch (e) {
-          console.error(`[ZenTabs] Error opening tab for ${bm.url}:`, e);
-          result.errors++;
+      if (!spaceFolder.children) continue;
+
+      for (const child of spaceFolder.children) {
+        if (child.uri) {
+          // Direct bookmark in the space root = pinned tab (had no Zen folder)
+          result.bookmarksFound++;
+          await this._openRestoredTab(child.uri, spaceUuid, "pinned", existingUrls, result);
+        } else if (child.uri == null && child.children !== undefined) {
+          // Sub-folder — infer type from its well-known name
+          const tabType =
+            child.title === "Essentials"     ? "essential" :
+            child.title === "Temporary tabs" ? "normal"    :
+            "normal"; // named Zen folder: type not preserved, default to normal
+          const bms = await this.getAllBookmarksInFolder(child.guid);
+          result.bookmarksFound += bms.length;
+          for (const bm of bms) {
+            await this._openRestoredTab(bm.url, spaceUuid, tabType, existingUrls, result);
+          }
         }
       }
     }
 
+    // Restore the workspace the user was in before the sync
+    if (gZenWorkspaces?.changeWorkspaceWithID && previousWorkspace) {
+      try { await gZenWorkspaces.changeWorkspaceWithID(previousWorkspace); } catch (e) { /* non-fatal */ }
+    }
+
     return result;
+  }
+
+  /**
+   * Open one tab during a bookmark restore, applying the correct workspace
+   * assignment and tab-type attributes (essential / pinned / normal).
+   */
+  async _openRestoredTab(url, spaceUuid, tabType, existingUrls, result) {
+    if (!url) return;
+    if (existingUrls.has(url)) { result.tabsExisting++; return; }
+    const { gBrowser } = this.manager.window;
+    try {
+      const tab = gBrowser.addTab(url, {
+        inBackground: true,
+        triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
+      });
+      if (!tab) { result.errors++; return; }
+      tab.setAttribute("zen-workspace-id", spaceUuid);
+      if (tabType === "essential") {
+        tab.setAttribute("zen-essential", "");
+      } else if (tabType === "pinned") {
+        gBrowser.pinTab(tab);
+      }
+      result.tabsCreated++;
+      existingUrls.add(url);
+    } catch (e) {
+      console.error(`[ZenTabs] Error opening tab for ${url}:`, e);
+      result.errors++;
+    }
   }
 
   /**
