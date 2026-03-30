@@ -52,7 +52,7 @@
 Via Sine's built-in installer:
 
 1. Open Zen Settings → Sine Mods → "Install new mod"
-2. Paste: `https://github.com/Tekka90/ZenTabsManager`
+2. Paste: `Tekka90/ZenTabsManager`
 3. Click Install
 4. Restart Zen Browser
 
