@@ -78,17 +78,16 @@ describe("Manifest persistence", () => {
 // ── syncBidirectional: bootstrap (empty manifest) ─────────────────────────
 
 describe("syncBidirectional — first install (empty manifest)", () => {
-  test("local tabs get pushed to bookmarks", async () => {
+  test("local essential tabs get pushed to bookmarks", async () => {
     const ws = makeWorkspace("Personal", "uuid-personal");
-    const tab = makeTab({ url: "https://example.com", title: "Example", attrs: { "zen-workspace-id": ws.uuid } });
+    const tab = makeTab({ url: "https://example.com", title: "Example",
+      attrs: { "zen-workspace-id": ws.uuid, "zen-essential": "" } });
 
     const mgr = makeManager({ workspaces: [ws], tabs: [tab] });
-
-    // TabManager stub returning the tab
     mgr.tabManager = {
       getAllTabs: async () => [{
         url: "https://example.com", title: "Example",
-        type: "normal", workspace: { id: ws.uuid, name: ws.name },
+        type: "essential", workspace: { id: ws.uuid, name: ws.name },
         tab,
       }]
     };
@@ -124,15 +123,50 @@ describe("syncBidirectional — first install (empty manifest)", () => {
     assert.equal(mgr.window.gBrowser.tabs[0].linkedBrowser.currentURI.spec, "https://remote.example.com");
   });
 
-  test("URL already in both tabs and bookmarks — no new tab is opened", async () => {
+  test("normal tabs are never pushed to bookmarks", async () => {
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const tab = makeTab({ url: "https://normal.com", attrs: { "zen-workspace-id": ws.uuid } });
+    const mgr = makeManager({ workspaces: [ws], tabs: [tab] });
+
+    mgr.tabManager = { getAllTabs: async () => [{
+      url: "https://normal.com", title: "Normal", type: "normal",
+      workspace: { id: ws.uuid, name: ws.name }, tab,
+    }]};
+
+    const sync = new SyncManager(mgr);
+    const r = await sync.syncBidirectional();
+
+    assert.equal(r.bookmarksCreated, 0);
+    const bms = await mgr.window.PlacesUtils.bookmarks.search({ url: "https://normal.com" });
+    assert.equal(bms.length, 0);
+  });
+
+  test("normal tabs are not tracked in the manifest", async () => {
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const tab = makeTab({ url: "https://normal.com", attrs: { "zen-workspace-id": ws.uuid } });
+    const mgr = makeManager({ workspaces: [ws], tabs: [tab] });
+
+    mgr.tabManager = { getAllTabs: async () => [{
+      url: "https://normal.com", title: "Normal", type: "normal",
+      workspace: { id: ws.uuid, name: ws.name }, tab,
+    }]};
+
+    const sync = new SyncManager(mgr);
+    await sync.syncBidirectional();
+
+    const m = sync.loadManifest();
+    const urls = m.get(ws.uuid);
+    assert.ok(!urls?.has("https://normal.com"), "normal URL must not be in manifest");
+  });
+
+  test("normal tab already in bookmarks — not re-opened, not deleted", async () => {
     const ws = makeWorkspace("Personal", "uuid-personal");
     const tab = makeTab({ url: "https://shared.com", attrs: { "zen-workspace-id": ws.uuid } });
     const mgr = makeManager({ workspaces: [ws], tabs: [tab] });
-    // Seed the bookmark in the exact canonical location (Zen/Personal/Normal/)
     const PlacesUtils = mgr.window.PlacesUtils;
     const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
-    const zenF  = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
-    const spaceF = await PlacesUtils.bookmarks.insert({ parentGuid: zenF.guid, type: "folder", title: ws.name });
+    const zenF   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const spaceF = await PlacesUtils.bookmarks.insert({ parentGuid: zenF.guid,   type: "folder", title: ws.name });
     const normF  = await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "folder", title: "Normal" });
     await PlacesUtils.bookmarks.insert({ parentGuid: normF.guid, type: "bookmark", title: "Shared", url: "https://shared.com" });
 
@@ -144,9 +178,9 @@ describe("syncBidirectional — first install (empty manifest)", () => {
     const sync = new SyncManager(mgr);
     const r = await sync.syncBidirectional();
 
-    // Bookmark already in the right folder — not re-created
+    // Normal tab: not pushed to bookmarks (already there from before, but no new creation)
     assert.equal(r.bookmarksCreated, 0);
-    // No new tabs opened (URL was already open)
+    // Already open, so not opened again
     assert.equal(r.tabsOpened, 0);
     assert.equal(mgr.window.gBrowser._removed.length, 0);
   });
@@ -253,7 +287,7 @@ describe("syncBidirectional — subsequent syncs (non-empty manifest)", () => {
     // Start with empty manifest
 
     mgr.tabManager = { getAllTabs: async () => [{
-      url: "https://new-local.com", title: "L", type: "normal",
+      url: "https://new-local.com", title: "L", type: "pinned",
       workspace: { id: ws.uuid, name: ws.name }, tab,
     }]};
 

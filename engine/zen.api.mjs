@@ -99,7 +99,22 @@ export const ZenTabsAPI = {
       statistics: stats,
       tabs: tabs
     }, null, 2);
-  }
+  },
+
+  pause() {
+    if (typeof window.ZenTabsManager === "undefined") throw new Error("ZenTabsManager not initialized");
+    window.ZenTabsManager.pause();
+  },
+
+  resume() {
+    if (typeof window.ZenTabsManager === "undefined") throw new Error("ZenTabsManager not initialized");
+    window.ZenTabsManager.resume();
+  },
+
+  isPaused() {
+    if (typeof window.ZenTabsManager === "undefined") throw new Error("ZenTabsManager not initialized");
+    return window.ZenTabsManager.isPaused();
+  },
 };
 
 export default ZenTabsAPI;

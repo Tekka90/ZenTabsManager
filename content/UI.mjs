@@ -9,6 +9,7 @@ export class UIManager {
     this.manager = manager;
     this.toolbarButton = null;
     this.menuPopup = null;
+    this.pauseMenuItem = null;
     this.log("UIManager created");
   }
 
@@ -54,6 +55,10 @@ export class UIManager {
       const popup = this.manager.window.document.createXULElement("menupopup");
       popup.id = "zentabs-menu-popup";
       
+      // Pause toggle — always first for quick access
+      this.pauseMenuItem = this.addMenuItem(popup, this.getPauseLabel(), () => this.togglePause());
+      this.addMenuSeparator(popup);
+
       // Add menu items
       this.addMenuItem(popup, "List All Tabs", () => this.listAllTabs(), "Cmd+Shift+L");
       this.addMenuItem(popup, "Sync to Bookmarks", () => this.syncToBookmarks(), "Cmd+Shift+B");
@@ -102,6 +107,22 @@ export class UIManager {
     const sep = this.manager.window.document.createXULElement("menuseparator");
     popup.appendChild(sep);
     return sep;
+  }
+
+  getPauseLabel() {
+    return this.manager.preferences.paused ? "▶ Resume ZenTabs" : "⏸ Pause ZenTabs";
+  }
+
+  togglePause() {
+    if (this.manager.preferences.paused) {
+      this.manager.resume();
+    } else {
+      this.manager.pause();
+    }
+    if (this.pauseMenuItem) {
+      this.pauseMenuItem.setAttribute("label", this.getPauseLabel());
+    }
+    this.showNotification("ZenTabs", this.manager.preferences.paused ? "Syncing paused" : "Syncing resumed");
   }
 
   /**
@@ -189,7 +210,7 @@ export class UIManager {
     console.log("🔄 Performing bidirectional sync...");
     const result = await this.manager.syncManager.syncBidirectional();
     console.log("✅ Bidirectional sync complete:", result);
-    this.showNotification("Bidirectional Sync", `Bookmarks: +${result.total.bookmarksCreated}, Tabs: +${result.total.tabsCreated}`);
+    this.showNotification("Bidirectional Sync", `Bookmarks: +${result.bookmarksCreated}, Tabs opened: +${result.tabsOpened}`);
   }
 
   async cleanupOldTabs() {

@@ -164,6 +164,7 @@ class ZenTabsManager {
       syncDirection: "bidirectional",
       syncInterval: 300,
       syncCloseRemovedTabs: false,
+      paused: false,
       cleanupEnabled: false,
       cleanupAge: 7,
       cleanupExcludeDomains: "",
@@ -206,6 +207,29 @@ class ZenTabsManager {
     }
     
     this.dispatchEvent("preferences-changed", { preferences: this.preferences });
+  }
+
+  pause() {
+    this.preferences.paused = true;
+    this.window?.clearInterval(this.syncInterval);
+    this.window?.clearInterval(this.cleanupInterval);
+    this.window?.clearInterval(this.memoryInterval);
+    this.syncInterval = null;
+    this.cleanupInterval = null;
+    this.memoryInterval = null;
+    this.dispatchEvent("paused", {});
+    this.log("ZenTabs paused");
+  }
+
+  resume() {
+    this.preferences.paused = false;
+    this.startBackgroundTasks();
+    this.dispatchEvent("resumed", {});
+    this.log("ZenTabs resumed");
+  }
+
+  isPaused() {
+    return this.preferences.paused === true;
   }
 
   dispatchEvent(eventType, data) {

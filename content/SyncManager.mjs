@@ -174,6 +174,10 @@ export class SyncManager {
    * Perform sync based on preferences
    */
   async performSync() {
+    if (this.manager.preferences.paused) {
+      this.log("Paused — skipping sync");
+      return null;
+    }
     if (this.syncInProgress) {
       this.log("Sync already in progress, skipping");
       return;
@@ -311,8 +315,11 @@ export class SyncManager {
       result.bySpace[space.name] = spaceResult;
     }
 
-    // Clean up orphan bookmarks from spaces with no open tabs at all
+    // Clean up orphan bookmarks from spaces with no open tabs at all.
+    // Skip null — these are space folders whose name no longer matches any workspace
+    // (renamed, deleted, etc.). Never delete what we can't positively identify.
     for (const [spaceUuid, urlMap] of bmBySpace) {
+      if (spaceUuid === null) continue;
       if (tabsBySpace.has(spaceUuid)) continue;
       for (const [, guid] of urlMap) {
         await this.deleteBookmark(guid);
@@ -415,6 +422,7 @@ export class SyncManager {
     ]);
 
     for (const spaceUuid of allSpaceUuids) {
+      if (spaceUuid === null) continue; // skip unrecognized/renamed space folders
       const M = manifest.get(spaceUuid)   ?? new Set();
       const T = tabsBySpace.get(spaceUuid) ?? new Map();
       const B = bmBySpace.get(spaceUuid)   ?? new Map();
@@ -426,14 +434,12 @@ export class SyncManager {
       // ── Tabs side ──────────────────────────────────────────────────────
 
       for (const [url, tabData] of T) {
-        if (!M.has(url)) {
-          // Opened locally → push to bookmarks
+        if (!M.has(url) && tabData.type !== "normal") {
+          // Opened locally (essential or pinned only) → push to bookmarks
           const spaceFolderGuid = await this.getOrCreateFolder(zenFolderGuid, spaceName);
           const subFolder = tabData.type === "essential"
             ? await this.getOrCreateFolder(spaceFolderGuid, "Essentials")
-            : tabData.type === "normal"
-              ? await this.getOrCreateFolder(spaceFolderGuid, "Normal")
-              : spaceFolderGuid; // pinned stays at space root
+            : spaceFolderGuid; // pinned stays at space root
           const created = await this.createOrUpdateBookmark(subFolder, tabData.title, url);
           if (created) { result.bookmarksCreated++; spaceResult.bookmarksCreated++; }
         }
@@ -498,8 +504,9 @@ export class SyncManager {
       for (const url of M) {
         if (!T.has(url) && B.has(url)) B_final.delete(url);
       }
-      for (const url of T.keys()) {
-        if (!M.has(url)) B_final.add(url);
+      for (const [url, tabData] of T) {
+        // Only track essential + pinned in the manifest — never normal tabs
+        if (!M.has(url) && tabData.type !== "normal") B_final.add(url);
       }
 
       // New manifest = intersection (what both sides now have)
