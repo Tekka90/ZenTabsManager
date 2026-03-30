@@ -6,6 +6,7 @@
  */
 
 console.log("[ZenTabs] Loading...");
+dump("[ZenTabs] zen.sys.mjs loading...\n");
 
 class ZenTabsManager {
   constructor() {
@@ -168,7 +169,7 @@ class ZenTabsManager {
     };
 
     try {
-      const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
+      const { Services } = ChromeUtils.importESModule("resource://gre/modules/Services.sys.mjs");
       const prefBranch = Services.prefs.getBranch("zentabs.");
       
       // Try to load from prefs
@@ -192,7 +193,7 @@ class ZenTabsManager {
     this.preferences = { ...this.preferences, ...newPrefs };
     
     try {
-      const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
+      const { Services } = ChromeUtils.importESModule("resource://gre/modules/Services.sys.mjs");
       const prefBranch = Services.prefs.getBranch("zentabs.");
       prefBranch.setStringPref("preferences", JSON.stringify(this.preferences));
     } catch (error) {
@@ -242,7 +243,8 @@ function initZenTabs(window) {
 }
 
 // Hook into window loading
-const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
+const { Services } = ChromeUtils.importESModule("resource://gre/modules/Services.sys.mjs");
+dump("[ZenTabs] Services loaded, registering window listener...\n");
 
 const windowListener = {
   onOpenWindow(xulWindow) {
@@ -265,6 +267,7 @@ while (windows.hasMoreElements()) {
 }
 
 console.log("[ZenTabs] Module loaded successfully");
+dump("[ZenTabs] Module loaded successfully\n");
 
 export default manager;
 export { ZenTabsManager };

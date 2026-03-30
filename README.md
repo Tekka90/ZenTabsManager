@@ -2,6 +2,8 @@
 
 **Advanced tab management for Zen Browser** with bi-directional bookmark sync, memory optimization, automatic cleanup, and intelligent tab organization.
 
+> ⚠️ **IMPORTANT:** This mod requires JavaScript. You MUST enable **"External marketplace"** in Sine settings or the mod won't work! See [Installation Guide](INSTALL.md) for details.
+
 ## ✨ Features
 
 ### 📊 Tab Management
@@ -41,45 +43,27 @@
 
 ## 📦 Installation
 
-### One-Command Installation (Recommended)
+**Prerequisites:**
+1. Zen Browser with [Sine mod loader](https://github.com/CosmoCreeper/Sine) installed
+2. **Enable "External marketplace"** in Sine settings (Settings → Sine → Enable external marketplace)
 
-Run the installer script:
+### Quick Install
 
-```bash
-cd /path/to/ZenTabs
-./install-sine-mod.sh
-```
+Via Sine's built-in installer:
 
-This will:
-- Copy the mod to your Zen mods directory
-- Set up all necessary files
-- Clean up temporary files
+1. Open Zen Settings → Sine Mods → "Install new mod"
+2. Paste: `https://github.com/Tekka90/ZenTabsManager`
+3. Click Install
+4. Restart Zen Browser
 
-**Then restart Zen Browser.**
-
-### Manual Installation
-
-If you prefer to install manually:
-
-**Step 1:** Copy this entire folder to your Zen mods directory:
+### Manual Install (Development)
 
 ```bash
-# macOS/Linux
-cp -r /path/to/ZenTabs ~/Library/Application\ Support/zen/mods/zentabs-manager/
-
-# Or manually place the folder in:
-# macOS: ~/Library/Application Support/zen/mods/
-# Linux: ~/.zen/mods/
-# Windows: %APPDATA%\\zen\\mods\\
+cd /path/to/ZenTabsManager
+./install-sine.sh
 ```
 
-**Step 2:** Restart Zen Browser
-
-**Step 3:** Verify installation in Browser Console (`Cmd+Shift+J`):
-
-```
-✅ ZenTabs Manager initialized successfully
-```
+**📖 For detailed instructions, troubleshooting, and requirements, see [INSTALL.md](INSTALL.md)**
 
 ### Verifying Installation
 
