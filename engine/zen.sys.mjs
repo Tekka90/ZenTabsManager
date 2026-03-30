@@ -28,13 +28,9 @@ class ZenTabsManager {
 
   async init(win) {
     this.window = win;
-    if (this.initialized) {
-      console.log("[ZenTabs] Already initialized");
-      return;
-    }
 
     try {
-      console.log("[ZenTabs] Initializing...");
+      console.log("[ZenTabs] Initializing for window...");
       
       // Load preferences
       await this.loadPreferences();
@@ -256,19 +252,33 @@ class ZenTabsManager {
   }
 }
 
-// Create and export manager
-const manager = new ZenTabsManager();
+// Per-window manager registry — one ZenTabsManager instance per chrome window
+const windowManagers = new WeakMap();
 
 // Auto-init when browser window is ready
-function initZenTabs(window) {
-  if (window.location.href !== "chrome://browser/content/browser.xhtml") {
+function initZenTabs(win) {
+  if (win.location.href !== "chrome://browser/content/browser.xhtml") {
     return;
   }
-  
+  if (windowManagers.has(win)) {
+    // Already initialised for this exact window object
+    return;
+  }
+
   console.log("[ZenTabs] Browser window ready, initializing manager...");
-  manager.init(window).catch(error => {
+  const manager = new ZenTabsManager();
+  windowManagers.set(win, manager);
+
+  manager.init(win).catch(error => {
     console.error("[ZenTabs] Initialization failed:", error);
+    windowManagers.delete(win);
   });
+
+  // Clean up when the window closes
+  win.addEventListener("unload", () => {
+    manager.shutdown().catch(console.error);
+    windowManagers.delete(win);
+  }, { once: true });
 }
 
 // Hook into window loading
@@ -283,7 +293,7 @@ const windowListener = {
 
 Services.wm.addListener(windowListener);
 
-// Check existing windows
+// Check existing windows (e.g. when mod is installed while browser is running)
 const windows = Services.wm.getEnumerator("navigator:browser");
 while (windows.hasMoreElements()) {
   const win = windows.getNext();
@@ -297,5 +307,5 @@ while (windows.hasMoreElements()) {
 console.log("[ZenTabs] Module loaded successfully");
 dump("[ZenTabs] Module loaded successfully\n");
 
-export default manager;
+export { windowManagers };
 export { ZenTabsManager };

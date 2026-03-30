@@ -277,29 +277,16 @@ export class SyncManager {
       const spaceFolderGuid = await this.getOrCreateFolder(zenFolderGuid, space.name);
       const spaceResult = { created: 0, updated: 0, deleted: 0 };
 
-      const essentialTabs = tabs.filter(t => t.type === "essential" && opts.includeEssential);
-      const pinnedTabs    = tabs.filter(t => t.type === "pinned"    && opts.includePinned);
-      const normalTabs    = tabs.filter(t => t.type === "normal"    && opts.includeNormal);
+      const syncTabs = tabs.filter(t =>
+        (t.type === "essential" && opts.includeEssential) ||
+        (t.type === "pinned"    && opts.includePinned) ||
+        (t.type === "normal"    && opts.includeNormal)
+      );
 
-      if (essentialTabs.length > 0) {
-        const folderGuid = await this.getOrCreateFolder(spaceFolderGuid, "Essentials");
-        for (const tabData of essentialTabs) {
-          const created = await this.createOrUpdateBookmark(folderGuid, tabData.title, tabData.url);
-          created ? (result.bookmarksCreated++, spaceResult.created++) : (result.bookmarksUpdated++, spaceResult.updated++);
-        }
-      }
-
-      for (const tabData of pinnedTabs) {
-        const created = await this.createOrUpdateBookmark(spaceFolderGuid, tabData.title, tabData.url);
+      for (const tabData of syncTabs) {
+        const folderGuid = await this.getBookmarkFolderForTab(spaceFolderGuid, tabData);
+        const created = await this.createOrUpdateBookmark(folderGuid, tabData.title, tabData.url);
         created ? (result.bookmarksCreated++, spaceResult.created++) : (result.bookmarksUpdated++, spaceResult.updated++);
-      }
-
-      if (normalTabs.length > 0) {
-        const folderGuid = await this.getOrCreateFolder(spaceFolderGuid, "Normal");
-        for (const tabData of normalTabs) {
-          const created = await this.createOrUpdateBookmark(folderGuid, tabData.title, tabData.url);
-          created ? (result.bookmarksCreated++, spaceResult.created++) : (result.bookmarksUpdated++, spaceResult.updated++);
-        }
       }
 
       // Delete orphan bookmarks (bookmarked but no longer open)
@@ -437,9 +424,7 @@ export class SyncManager {
         if (!M.has(url) && tabData.type !== "normal") {
           // Opened locally (essential or pinned only) → push to bookmarks
           const spaceFolderGuid = await this.getOrCreateFolder(zenFolderGuid, spaceName);
-          const subFolder = tabData.type === "essential"
-            ? await this.getOrCreateFolder(spaceFolderGuid, "Essentials")
-            : spaceFolderGuid; // pinned stays at space root
+          const subFolder = await this.getBookmarkFolderForTab(spaceFolderGuid, tabData);
           const created = await this.createOrUpdateBookmark(subFolder, tabData.title, url);
           if (created) { result.bookmarksCreated++; spaceResult.bookmarksCreated++; }
         }
@@ -520,6 +505,30 @@ export class SyncManager {
     return result;
   }
   // ── PlacesUtils helpers ────────────────────────────────────────────────
+
+  /**
+   * Resolve the bookmark folder for a tab, mirroring its Zen folder hierarchy.
+   * Falls back to an "Essentials" subfolder for unfoldered essential tabs,
+   * and the space root for unfoldered pinned/normal tabs.
+   */
+  async getBookmarkFolderForTab(spaceFolderGuid, tabData) {
+    const folderPath = tabData.folderPath;
+    if (folderPath && folderPath.length > 0) {
+      let parentGuid = spaceFolderGuid;
+      for (const name of folderPath) {
+        parentGuid = await this.getOrCreateFolder(parentGuid, name);
+      }
+      return parentGuid;
+    }
+    // No Zen folder — fall back to type-based location
+    if (tabData.type === "essential") {
+      return await this.getOrCreateFolder(spaceFolderGuid, "Essentials");
+    }
+    if (tabData.type === "normal") {
+      return await this.getOrCreateFolder(spaceFolderGuid, "Temporary tabs");
+    }
+    return spaceFolderGuid; // pinned with no folder → space root
+  }
 
   async getOrCreateFolder(parentId, title) {
     const existing = await this.manager.window.PlacesUtils.bookmarks.search({
