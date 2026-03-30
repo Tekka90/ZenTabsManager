@@ -454,7 +454,7 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     assert.ok(!tab.hasAttribute("zen-essential"));
   });
 
-  test("named Zen folder bookmark → tab is normal (not pinned or essential)", async () => {
+  test("named Zen folder bookmark → tab is pinned (folder = pinned tab's Zen folder)", async () => {
     const ws = makeWorkspace("Personal", "uuid-personal");
     const mgr = makeManager({ workspaces: [ws], tabs: [] });
     await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://foldered.com", "Foldered", "My Projects");
@@ -464,8 +464,8 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     await sync.syncFromBookmarks();
 
     const tab = mgr.window.gBrowser.tabs[0];
-    assert.equal(tab.pinned, false, "tab in Zen folder should not be pinned");
-    assert.ok(!tab.hasAttribute("zen-essential"), "tab in Zen folder should not be essential");
+    assert.equal(tab.pinned, true, "named folder in space root = pinned tab's Zen folder");
+    assert.ok(!tab.hasAttribute("zen-essential"));
   });
 
   test("fresh install — no spaces — creates the space and opens tabs", async () => {

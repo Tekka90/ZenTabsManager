@@ -407,7 +407,7 @@ export class SyncManager {
           const tabType =
             child.title === "Essentials"     ? "essential" :
             child.title === "Temporary tabs" ? "normal"    :
-            "normal"; // named Zen folder: type not preserved, default to normal
+            "pinned"; // any other named folder = pinned tab's Zen folder
           const bms = await this.getAllBookmarksInFolder(child.guid);
           result.bookmarksFound += bms.length;
           for (const bm of bms) {
