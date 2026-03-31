@@ -1016,9 +1016,17 @@ export class SyncManager {
   _essentialsFolderName(spaceUuid) {
     const gZenWorkspaces = this.manager.window.gZenWorkspaces;
     const ws = gZenWorkspaces?.getWorkspaceFromId(spaceUuid);
+    // Diagnostic — always log so we can see why container names are missing
+    console.log("[ZenTabs][diag] _essentialsFolderName:",
+      "spaceUuid=", spaceUuid,
+      "ws.name=", ws?.name,
+      "containerTabId=", ws?.containerTabId,
+      "CIS=", !!(this.manager.window.ContextualIdentityService ?? globalThis.ContextualIdentityService));
     if (ws?.containerTabId) {
       const identity = this._getContainerIdentity(ws.containerTabId);
-      if (identity?.name) return `Essentials (${identity.name})`;
+      console.log("[ZenTabs][diag]   identity=", identity);
+      const name = identity?.name ?? identity?.l10nId ?? null;
+      if (name) return `Essentials (${name})`;
     }
     return "Essentials";
   }
