@@ -1078,15 +1078,7 @@ export class SyncManager {
     });
     for (const bookmark of existing) {
       if (bookmark.title === title && bookmark.parentGuid === parentId) {
-        // Verify the folder still exists (it may have been deleted externally
-        // but not yet flushed from the Places search index).
-        try {
-          const live = await this.manager.window.PlacesUtils.bookmarks.fetch(bookmark.guid);
-          if (live) return bookmark.guid;
-          this.log(`Stale folder GUID ${bookmark.guid} for "${title}" — will recreate`);
-        } catch (e) {
-          this.log(`Stale folder GUID ${bookmark.guid} for "${title}" — will recreate`);
-        }
+        return bookmark.guid;
       }
     }
     const folder = await this.manager.window.PlacesUtils.bookmarks.insert({
