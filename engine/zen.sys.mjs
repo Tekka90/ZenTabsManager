@@ -94,7 +94,21 @@ class ZenTabsManager {
 
   async initializeManagers() {
     console.log("[ZenTabs] Loading managers...");
-    
+
+    // Make ContextualIdentityService available for SyncManager's container helpers.
+    // Must happen here (chrome script scope) because dynamic-import ESM modules
+    // cannot reliably call ChromeUtils.importESModule themselves.
+    try {
+      if (typeof ChromeUtils !== "undefined" && ChromeUtils.importESModule) {
+        const { ContextualIdentityService } = ChromeUtils.importESModule(
+          "resource://gre/modules/ContextualIdentityService.sys.mjs"
+        );
+        this.window.ContextualIdentityService = ContextualIdentityService;
+      }
+    } catch (e) {
+      console.warn("[ZenTabs] Could not import ContextualIdentityService:", e.message);
+    }
+
     const { TabManager } = await import("../content/TabManager.mjs");
     const { SyncManager } = await import("../content/SyncManager.mjs");
     const { CleanupManager } = await import("../content/CleanupManager.mjs");

@@ -946,46 +946,15 @@ export class SyncManager {
   // ── Container helpers (essential-tab scoping) ───────────────────────────
 
   /**
-   * Resolve the ContextualIdentityService singleton.
-   *
-   * In the real browser it must be imported via ChromeUtils; in Node.js tests
-   * it is placed on `manager.window` or `globalThis` by the mock helper.
-   */
-  _getCIS() {
-    // Test / fallback paths
-    const fromWindow = this.manager.window.ContextualIdentityService
-      ?? globalThis.ContextualIdentityService;
-    if (fromWindow) return fromWindow;
-
-    // Real browser: import from toolkit module
-    try {
-      if (typeof ChromeUtils !== "undefined" && ChromeUtils.importESModule) {
-        const { ContextualIdentityService } = ChromeUtils.importESModule(
-          "resource://gre/modules/ContextualIdentityService.sys.mjs"
-        );
-        return ContextualIdentityService;
-      }
-    } catch (e) { /* non-fatal */ }
-    return null;
-  }
-
-  /**
-   * Get the display name of a container identity.
-   * Custom containers have a `name` property; Firefox built-in containers
-   * (Personal, Work, Banking, Shopping) have a `l10nId` instead.
-   */
-  _containerName(identity) {
-    if (!identity) return null;
-    return identity.name ?? identity.l10nId ?? null;
-  }
-
-  /**
    * Look up a container identity by its userContextId.
+   * ContextualIdentityService is placed on window by zen.sys.mjs during init.
+   * In tests it is placed on window by the mock helper.
    * @returns {{ userContextId, name, icon, color } | null}
    */
   _getContainerIdentity(containerTabId) {
     try {
-      const CIS = this._getCIS();
+      const CIS = this.manager.window.ContextualIdentityService
+        ?? globalThis.ContextualIdentityService;
       if (!CIS) return null;
       // Prefer the direct lookup (real Firefox API)
       if (CIS.getPublicIdentityFromId) {
@@ -1007,10 +976,11 @@ export class SyncManager {
    */
   _findContainerByName(name) {
     try {
-      const CIS = this._getCIS();
+      const CIS = this.manager.window.ContextualIdentityService
+        ?? globalThis.ContextualIdentityService;
       if (CIS?.getPublicIdentities) {
         return CIS.getPublicIdentities().find(
-          id => this._containerName(id) === name
+          id => (id.name ?? id.l10nId) === name
         ) ?? null;
       }
     } catch (e) { /* non-fatal */ }
@@ -1026,7 +996,8 @@ export class SyncManager {
     const existing = this._findContainerByName(name);
     if (existing) return existing.userContextId;
     try {
-      const CIS = this._getCIS();
+      const CIS = this.manager.window.ContextualIdentityService
+        ?? globalThis.ContextualIdentityService;
       if (CIS?.create) {
         const identity = CIS.create(name, "circle", "blue");
         return identity.userContextId;
@@ -1047,8 +1018,7 @@ export class SyncManager {
     const ws = gZenWorkspaces?.getWorkspaceFromId(spaceUuid);
     if (ws?.containerTabId) {
       const identity = this._getContainerIdentity(ws.containerTabId);
-      const name = this._containerName(identity);
-      if (name) return `Essentials (${name})`;
+      if (identity?.name) return `Essentials (${identity.name})`;
     }
     return "Essentials";
   }
