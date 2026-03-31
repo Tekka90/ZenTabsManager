@@ -1780,3 +1780,62 @@ describe("Complex scenario — tabs → empty bookmarks (2 workspaces × 15 tabs
     assert.equal(sharedTabs.length, 6, "shared.com: 6 tabs (3 per workspace)");
   });
 });
+
+// ── getOrCreateFolder stale GUID recovery ──────────────────────────────────
+
+describe("getOrCreateFolder stale GUID recovery", () => {
+  test("recreates folder when existing GUID is stale (externally deleted)", async () => {
+    const mgr = makeManager();
+    const sync = new SyncManager(mgr);
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    // Create a Zen folder
+    const zenGuid1 = await sync.getOrCreateFolder("toolbar", "Zen");
+    assert.ok(zenGuid1);
+
+    // Simulate stale search index: search still returns the deleted folder,
+    // but fetch returns null for it.
+    const origSearch = PlacesUtils.bookmarks.search.bind(PlacesUtils.bookmarks);
+    const origFetch  = PlacesUtils.bookmarks.fetch.bind(PlacesUtils.bookmarks);
+    const staleEntry = { guid: zenGuid1, parentGuid: "toolbar", type: "folder", title: "Zen" };
+
+    // Remove from real store so the new folder gets a fresh GUID
+    PlacesUtils.bookmarks._store.delete(zenGuid1);
+
+    // search returns the stale entry along with any new ones
+    PlacesUtils.bookmarks.search = async (params) => {
+      const live = await origSearch(params);
+      // Inject the stale entry if it matches the query
+      if (params.query === "Zen" && params.type === "folder") {
+        return [staleEntry, ...live];
+      }
+      return live;
+    };
+    // fetch returns null for the stale GUID
+    PlacesUtils.bookmarks.fetch = async (guid) => {
+      if (guid === zenGuid1) return null;
+      return origFetch(guid);
+    };
+
+    // getOrCreateFolder should skip the stale GUID and create a new one
+    const zenGuid2 = await sync.getOrCreateFolder("toolbar", "Zen");
+    assert.ok(zenGuid2);
+    assert.notEqual(zenGuid2, zenGuid1, "should get a fresh GUID, not the stale one");
+
+    // The new folder should be fetchable
+    PlacesUtils.bookmarks.fetch = origFetch;
+    PlacesUtils.bookmarks.search = origSearch;
+    const fetched = await PlacesUtils.bookmarks.fetch(zenGuid2);
+    assert.ok(fetched, "new folder exists in store");
+    assert.equal(fetched.title, "Zen");
+  });
+
+  test("reuses valid folder when GUID is not stale", async () => {
+    const mgr = makeManager();
+    const sync = new SyncManager(mgr);
+
+    const zenGuid1 = await sync.getOrCreateFolder("toolbar", "Zen");
+    const zenGuid2 = await sync.getOrCreateFolder("toolbar", "Zen");
+    assert.equal(zenGuid1, zenGuid2, "same GUID returned when folder is valid");
+  });
+});

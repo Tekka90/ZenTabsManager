@@ -110,6 +110,12 @@ export function makePlacesUtils() {
       });
     },
 
+    async fetch(guid) {
+      const entry = bm.get(guid);
+      if (!entry) return null;
+      return entry;
+    },
+
     // Direct access for test inspection
     _store: bm,
     _getChildren: getChildren,
