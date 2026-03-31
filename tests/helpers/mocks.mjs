@@ -220,12 +220,47 @@ export function makeGZenFolders() {
       for (const tab of tabs) {
         tab.pinned = true;
       }
+
+      // Simulate the DOM-like groupContainer that the real Zen folder
+      // element exposes.  In the real browser, nesting is achieved by
+      // inserting the child folder's DOM node inside the parent's
+      // groupContainer.  `lastElementChild` is used by the SyncManager
+      // to tell the next createFolder call where to insert.
+      const containerChildren = [];
+      // Zen always creates an empty tab inside the folder
+      containerChildren.push({ _emptyTab: true });
+      for (const tab of tabs) {
+        containerChildren.push(tab);
+      }
+
+      const groupContainer = {
+        get lastElementChild() {
+          return containerChildren[containerChildren.length - 1] || null;
+        },
+        _children: containerChildren,
+      };
+
       const entry = {
         label: options.label,
         workspaceId: options.workspaceId,
-        parentFolder: options.parentFolder || null,
+        parentFolder: null,
         tabs: [...tabs],
+        groupContainer,
       };
+
+      // Resolve parent folder from `insertAfter` (DOM-based nesting).
+      // If `insertAfter` is an element that belongs to another folder's
+      // groupContainer, then this folder is nested inside that parent.
+      if (options.insertAfter) {
+        for (const folder of createdFolders) {
+          if (folder.groupContainer._children.includes(options.insertAfter)) {
+            entry.parentFolder = folder;
+            folder.groupContainer._children.push(entry);
+            break;
+          }
+        }
+      }
+
       createdFolders.push(entry);
       return entry;
     },

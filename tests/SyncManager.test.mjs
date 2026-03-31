@@ -1106,7 +1106,7 @@ describe("Complex scenario — bookmarks → empty tabs (2 workspaces × 15 book
     }
   });
 
-  test("after syncFromBookmarks, a syncToBookmarks round-trip is a perfect match (no changes)", async () => {
+  test("full round-trip: bookmarks → tabs (clear) → bookmarks recreates identical tree", async () => {
     const wsWork     = makeWorkspace("Work",     "uuid-work");
     const wsPersonal = makeWorkspace("Personal", "uuid-personal");
     const spaceNameById = { [wsWork.uuid]: "Work", [wsPersonal.uuid]: "Personal" };
@@ -1117,20 +1117,31 @@ describe("Complex scenario — bookmarks → empty tabs (2 workspaces × 15 book
     await buildSpaceBookmarks(PlacesUtils, zenF.guid, "Work",     workUrls);
     await buildSpaceBookmarks(PlacesUtils, zenF.guid, "Personal", personalUrls);
 
-    // First: bookmarks → tabs
+    // Step 1: bookmarks → tabs (empty)
     mgr.tabManager = { getAllTabs: async () => [] };
     const sync = new SyncManager(mgr);
-    await sync.syncFromBookmarks();
+    const r1 = await sync.syncFromBookmarks();
+    assert.equal(r1.tabsCreated, 30, "step 1: 30 tabs created from bookmarks");
 
-    // Build getAllTabs that reflects created tabs
+    // Verify Zen folders were created
+    const foldersAfterStep1 = mgr.window.gZenFolders._createdFolders;
+    assert.equal(foldersAfterStep1.length, 12, "step 1: 12 Zen folders created");
+
+    // Step 2: clear all bookmarks under toolbar (simulate fresh device)
+    // Keep the toolbar root itself so promiseBookmarksTree still works
+    const zenRoot = (await PlacesUtils.promiseBookmarksTree(PlacesUtils.bookmarks.toolbarGuid))
+      .children?.find(c => c.title === "Zen");
+    if (zenRoot) await PlacesUtils.bookmarks.remove(zenRoot.guid);
+
+    // Build getAllTabs from the tabs that were just created
     mgr.tabManager = { getAllTabs: async () =>
       mgr.window.gBrowser.tabs
         .filter(t => !t.hasAttribute("zen-empty-tab"))
         .map(t => {
           const url = t.linkedBrowser.currentURI.spec;
           const type = t.hasAttribute("zen-essential") ? "essential" : t.pinned ? "pinned" : "normal";
-          const folder = mgr.window.gZenFolders._createdFolders.find(f => f.tabs.includes(t));
-          const parentFolder = folder?.parentFolder ? mgr.window.gZenFolders._createdFolders.find(f => f === folder.parentFolder) : null;
+          const folder = foldersAfterStep1.find(f => f.tabs.includes(t));
+          const parentFolder = folder?.parentFolder ? foldersAfterStep1.find(f => f === folder.parentFolder) : null;
           const folderPath = folder
             ? (parentFolder ? [parentFolder.label, folder.label] : [folder.label])
             : undefined;
@@ -1144,11 +1155,46 @@ describe("Complex scenario — bookmarks → empty tabs (2 workspaces × 15 book
         })
     };
 
-    // Second: tabs → bookmarks
+    // Step 3: tabs → empty bookmarks
     const r2 = await sync.syncToBookmarks({ includeEssential: true, includePinned: true, includeNormal: false });
+    assert.equal(r2.bookmarksCreated, 30, "step 3: 30 bookmarks recreated");
+    assert.equal(r2.bookmarksDeleted, 0, "step 3: no orphan deletions");
 
-    assert.equal(r2.bookmarksCreated, 0, "no new bookmarks created on round-trip");
-    assert.equal(r2.bookmarksDeleted, 0, "no bookmarks deleted on round-trip");
+    // Verify the bookmark tree structure matches the original
+    const zenTree = await PlacesUtils.promiseBookmarksTree(PlacesUtils.bookmarks.toolbarGuid);
+    const zenFolder = zenTree.children.find(c => c.title === "Zen");
+    assert.ok(zenFolder, "Zen root recreated");
+
+    for (const [spaceName, folderNames, subNames, essUrls] of [
+      ["Work", ["FolderA", "FolderB", "FolderC"], ["SubA", "SubB", "SubC"],
+        ["https://mail.google.com", "https://shared.com", "https://slack.com"]],
+      ["Personal", ["FolderD", "FolderE", "FolderF"], ["SubD", "SubE", "SubF"],
+        ["https://proton.me", "https://shared.com", "https://whatsapp.com"]],
+    ]) {
+      const spaceFolder = zenFolder.children.find(c => c.title === spaceName);
+      assert.ok(spaceFolder, `${spaceName} folder recreated`);
+
+      // Essentials
+      const essF = spaceFolder.children.find(c => c.title === "Essentials");
+      assert.ok(essF, `Essentials in ${spaceName}`);
+      const essBms = essF.children.filter(c => c.uri);
+      assert.equal(essBms.length, 3, `3 essentials in ${spaceName}`);
+      assert.deepEqual(essBms.map(b => b.uri).sort(), essUrls.sort(), `correct essential URLs in ${spaceName}`);
+
+      // Named folders + subfolders
+      for (let i = 0; i < folderNames.length; i++) {
+        const folder = spaceFolder.children.find(c => c.title === folderNames[i]);
+        assert.ok(folder, `${folderNames[i]} exists in ${spaceName}`);
+        assert.equal(folder.children.filter(c => c.uri).length, 2, `${folderNames[i]} has 2 direct bookmarks`);
+        const sub = folder.children.find(c => c.title === subNames[i]);
+        assert.ok(sub, `${subNames[i]} inside ${folderNames[i]}`);
+        assert.equal(sub.children.filter(c => c.uri).length, 2, `${subNames[i]} has 2 bookmarks`);
+      }
+    }
+
+    // Cross-workspace shared.com
+    const allShared = await PlacesUtils.bookmarks.search({ url: "https://shared.com" });
+    assert.equal(allShared.length, 6, "shared.com bookmarked 6 times across both workspaces");
   });
 });
 
@@ -1324,7 +1370,7 @@ describe("Complex scenario — tabs → empty bookmarks (2 workspaces × 15 tabs
     assert.equal(allShared.length, 6, "shared.com bookmarked 6 times across both workspaces");
   });
 
-  test("after syncToBookmarks, a syncFromBookmarks round-trip is a perfect match (no new tabs)", async () => {
+  test("full round-trip: tabs → bookmarks (clear tabs) → bookmarks → tabs recreates identical folder structure", async () => {
     const wsWork     = makeWorkspace("Work",     "uuid-work");
     const wsPersonal = makeWorkspace("Personal", "uuid-personal");
     const work     = buildSpaceTabs(wsWork.uuid,     "Work",     workUrls);
@@ -1335,16 +1381,93 @@ describe("Complex scenario — tabs → empty bookmarks (2 workspaces × 15 tabs
 
     mgr.tabManager = { getAllTabs: async () => tabDataList };
 
-    // First: tabs → bookmarks
+    // Step 1: tabs → bookmarks
     const sync = new SyncManager(mgr);
-    await sync.syncToBookmarks({ includeEssential: true, includePinned: true, includeNormal: false });
+    const r1 = await sync.syncToBookmarks({ includeEssential: true, includePinned: true, includeNormal: false });
+    assert.equal(r1.bookmarksCreated, 30, "step 1: 30 bookmarks created");
 
-    // Second: bookmarks → tabs (all 30 already open)
+    // Step 2: clear ALL tabs (simulate fresh device / new browser window)
+    while (mgr.window.gBrowser.tabs.length > 0) {
+      mgr.window.gBrowser.removeTab(mgr.window.gBrowser.tabs[0]);
+    }
+    assert.equal(mgr.window.gBrowser.tabs.length, 0, "all tabs cleared");
+
+    // Clear the folder tracker so we can verify fresh creation
+    mgr.window.gZenFolders._createdFolders.length = 0;
+
+    // Update tabManager to reflect empty tab state
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    // Step 3: bookmarks → empty tabs
     const r2 = await sync.syncFromBookmarks();
+    assert.equal(r2.tabsCreated, 30, "step 3: 30 tabs recreated from bookmarks");
+    assert.equal(r2.tabsExisting, 0, "step 3: no pre-existing tabs");
+    assert.equal(r2.errors, 0, "step 3: no errors");
+    assert.equal(mgr.window.gBrowser.tabs.length, 30, "30 tabs in gBrowser");
 
-    assert.equal(r2.tabsCreated, 0, "no new tabs created on round-trip");
-    assert.equal(r2.tabsExisting, 30, "all 30 tabs already exist");
-    assert.equal(r2.errors, 0, "no errors");
-    assert.equal(mgr.window.gBrowser.tabs.length, 30, "still 30 tabs");
+    // ── Per-workspace tab counts ────────────────────────────────────
+    const workTabs     = mgr.window.gBrowser.tabs.filter(t => t.getAttribute("zen-workspace-id") === wsWork.uuid);
+    const personalTabs = mgr.window.gBrowser.tabs.filter(t => t.getAttribute("zen-workspace-id") === wsPersonal.uuid);
+    assert.equal(workTabs.length, 15, "15 tabs in Work space");
+    assert.equal(personalTabs.length, 15, "15 tabs in Personal space");
+
+    // ── Essential tabs per workspace ────────────────────────────────
+    const workEssentials     = workTabs.filter(t => t.hasAttribute("zen-essential"));
+    const personalEssentials = personalTabs.filter(t => t.hasAttribute("zen-essential"));
+    assert.equal(workEssentials.length, 3, "3 essential tabs in Work");
+    assert.equal(personalEssentials.length, 3, "3 essential tabs in Personal");
+    assert.deepEqual(
+      workEssentials.map(t => t.linkedBrowser.currentURI.spec).sort(),
+      ["https://mail.google.com", "https://shared.com", "https://slack.com"].sort(),
+      "Work essential URLs correct"
+    );
+    assert.deepEqual(
+      personalEssentials.map(t => t.linkedBrowser.currentURI.spec).sort(),
+      ["https://proton.me", "https://shared.com", "https://whatsapp.com"].sort(),
+      "Personal essential URLs correct"
+    );
+
+    // ── Zen folder structure recreated ──────────────────────────────
+    const folders = mgr.window.gZenFolders._createdFolders;
+    assert.equal(folders.length, 12, "12 Zen folders recreated (6 per workspace)");
+
+    // Work folders
+    const workFolders = folders.filter(f => f.workspaceId === wsWork.uuid);
+    assert.equal(workFolders.length, 6, "6 folders in Work");
+    assert.deepEqual(
+      workFolders.map(f => f.label).sort(),
+      ["FolderA", "FolderB", "FolderC", "SubA", "SubB", "SubC"].sort()
+    );
+
+    // Personal folders
+    const persFolders = folders.filter(f => f.workspaceId === wsPersonal.uuid);
+    assert.equal(persFolders.length, 6, "6 folders in Personal");
+    assert.deepEqual(
+      persFolders.map(f => f.label).sort(),
+      ["FolderD", "FolderE", "FolderF", "SubD", "SubE", "SubF"].sort()
+    );
+
+    // Nesting + tab counts
+    for (const [parentName, childName, wsFolders] of [
+      ["FolderA", "SubA", workFolders],
+      ["FolderB", "SubB", workFolders],
+      ["FolderC", "SubC", workFolders],
+      ["FolderD", "SubD", persFolders],
+      ["FolderE", "SubE", persFolders],
+      ["FolderF", "SubF", persFolders],
+    ]) {
+      const parent = wsFolders.find(f => f.label === parentName);
+      const child  = wsFolders.find(f => f.label === childName);
+      assert.equal(parent.parentFolder, null, `${parentName} at root`);
+      assert.strictEqual(child.parentFolder, parent, `${childName} nested inside ${parentName}`);
+      assert.equal(parent.tabs.length, 2, `${parentName} has 2 direct tabs`);
+      assert.equal(child.tabs.length, 2, `${childName} has 2 tabs`);
+    }
+
+    // ── Cross-workspace shared.com = 6 tabs ─────────────────────────
+    const sharedTabs = mgr.window.gBrowser.tabs.filter(
+      t => t.linkedBrowser.currentURI.spec === "https://shared.com"
+    );
+    assert.equal(sharedTabs.length, 6, "shared.com: 6 tabs (3 per workspace)");
   });
 });

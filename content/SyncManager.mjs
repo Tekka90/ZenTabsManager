@@ -569,7 +569,9 @@ export class SyncManager {
         if (createdTabs.length > 0) {
           try {
             const opts = { label: folderChild.title, workspaceId: spaceUuid };
-            if (parentFolder) opts.parentFolder = parentFolder;
+            if (parentFolder?.groupContainer?.lastElementChild) {
+              opts.insertAfter = parentFolder.groupContainer.lastElementChild;
+            }
             createdFolder = gZenFolders.createFolder(createdTabs, opts);
             result.tabsCreated += createdTabs.length;
           } catch (e) {
@@ -585,7 +587,9 @@ export class SyncManager {
       // No direct bookmarks but has sub-folders: create an empty container
       try {
         const opts = { label: folderChild.title, workspaceId: spaceUuid };
-        if (parentFolder) opts.parentFolder = parentFolder;
+        if (parentFolder?.groupContainer?.lastElementChild) {
+          opts.insertAfter = parentFolder.groupContainer.lastElementChild;
+        }
         createdFolder = gZenFolders.createFolder([], opts);
       } catch (e) {
         this.log(`Could not create container folder "${folderChild.title}":`, e.message);
