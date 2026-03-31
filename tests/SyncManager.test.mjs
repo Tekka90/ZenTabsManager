@@ -534,7 +534,7 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     assert.equal(tab.getAttribute("usercontextid"), "5", "essential tab should carry space containerTabId as userContextId");
   });
 
-  test("Essentials subfolder → tab has no usercontextid when containerTabId is 0", async () => {
+  test("Essentials subfolder → workspace with containerTabId 0 gets a container created", async () => {
     const ws = makeWorkspace("Personal", "uuid-personal"); // containerTabId: 0
     const mgr = makeManager({ workspaces: [ws], tabs: [] });
     await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://essential.com", "Essential", "Essentials");
@@ -543,8 +543,12 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     const sync = new SyncManager(mgr);
     await sync.syncFromBookmarks();
 
+    // The workspace should now have a non-zero containerTabId
+    assert.ok(ws.containerTabId > 0, "workspace should have been assigned a container");
     const tab = mgr.window.gBrowser.tabs[0];
-    assert.ok(!tab.hasAttribute("usercontextid"), "should not set usercontextid when containerTabId is 0");
+    assert.ok(tab.hasAttribute("usercontextid"), "essential tab should carry the new container id");
+    assert.equal(tab.getAttribute("usercontextid"), String(ws.containerTabId),
+      "essential tab's usercontextid should match workspace's containerTabId");
   });
 
   test("bookmark in space root → tab is pinned", async () => {
@@ -849,6 +853,311 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     assert.equal(r.tabsExisting, 1, "Projects tab matches Projects bookmark");
     // Research bookmark has no matching tab → new tab created
     assert.equal(r.tabsCreated, 1, "new tab created for Research bookmark");
+  });
+});
+
+// ── Essential tab container scoping ───────────────────────────────────────
+
+describe("Essential tab container scoping", () => {
+  test("syncFromBookmarks: fresh profile with 2 workspaces → each gets unique container for essentials", async () => {
+    const mgr = makeManager({ workspaces: [], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenFolder = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+
+    // Work: 1 essential
+    const workFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid, type: "folder", title: "Work" });
+    const workEssF   = await PlacesUtils.bookmarks.insert({ parentGuid: workFolder.guid, type: "folder", title: "Essentials" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: workEssF.guid, type: "bookmark", title: "Gmail", url: "https://mail.google.com" });
+
+    // Personal: 3 essentials
+    const persFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid, type: "folder", title: "Personal" });
+    const persEssF   = await PlacesUtils.bookmarks.insert({ parentGuid: persFolder.guid, type: "folder", title: "Essentials" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: persEssF.guid, type: "bookmark", title: "Proton", url: "https://proton.me" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: persEssF.guid, type: "bookmark", title: "WhatsApp", url: "https://whatsapp.com" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: persEssF.guid, type: "bookmark", title: "Signal", url: "https://signal.org" });
+
+    // Hobby: no essentials (only pinned)
+    const hobbyFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid, type: "folder", title: "Hobby" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: hobbyFolder.guid, type: "bookmark", title: "Reddit", url: "https://reddit.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+    const sync = new SyncManager(mgr);
+    const r = await sync.syncFromBookmarks();
+
+    assert.equal(r.spacesCreated, 3, "3 spaces created");
+    assert.equal(r.tabsCreated, 5, "5 tabs created (1+3+1)");
+
+    const workspaces = mgr.window.gZenWorkspaces.getWorkspaces();
+    const workWs  = workspaces.find(w => w.name === "Work");
+    const persWs  = workspaces.find(w => w.name === "Personal");
+    const hobbyWs = workspaces.find(w => w.name === "Hobby");
+
+    // Work and Personal should have non-zero, different containerTabIds
+    assert.ok(workWs.containerTabId > 0, "Work has a container");
+    assert.ok(persWs.containerTabId > 0, "Personal has a container");
+    assert.notEqual(workWs.containerTabId, persWs.containerTabId,
+      "Work and Personal have different containers");
+
+    // Hobby has no essentials → containerTabId stays 0
+    assert.equal(hobbyWs.containerTabId, 0, "Hobby has no container (no essentials)");
+
+    // Verify essential tabs carry the correct container id
+    const workEssTabs = mgr.window.gBrowser.tabs.filter(
+      t => t.getAttribute("zen-workspace-id") === workWs.uuid && t.hasAttribute("zen-essential")
+    );
+    const persEssTabs = mgr.window.gBrowser.tabs.filter(
+      t => t.getAttribute("zen-workspace-id") === persWs.uuid && t.hasAttribute("zen-essential")
+    );
+    assert.equal(workEssTabs.length, 1, "1 essential in Work");
+    assert.equal(persEssTabs.length, 3, "3 essentials in Personal");
+
+    for (const tab of workEssTabs) {
+      assert.equal(tab.getAttribute("usercontextid"), String(workWs.containerTabId),
+        "Work essential tab has Work container id");
+    }
+    for (const tab of persEssTabs) {
+      assert.equal(tab.getAttribute("usercontextid"), String(persWs.containerTabId),
+        "Personal essential tab has Personal container id");
+    }
+  });
+
+  test("syncFromBookmarks: existing workspace with non-zero containerTabId → container preserved", async () => {
+    const ws = { ...makeWorkspace("Work", "uuid-work"), containerTabId: 42 };
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://essential.com", "Essential", "Essentials");
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    assert.equal(ws.containerTabId, 42, "existing non-zero container should not be replaced");
+    const tab = mgr.window.gBrowser.tabs[0];
+    assert.equal(tab.getAttribute("usercontextid"), "42");
+  });
+
+  test("syncFromBookmarks: workspace without Essentials → no container created", async () => {
+    const mgr = makeManager({ workspaces: [], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenFolder = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const spaceFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid, type: "folder", title: "PinnedOnly" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceFolder.guid, type: "bookmark", title: "Site", url: "https://site.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const ws = mgr.window.gZenWorkspaces.getWorkspaces().find(w => w.name === "PinnedOnly");
+    assert.equal(ws.containerTabId, 0, "no container for workspace without essentials");
+    // No containers created
+    const cisIdentities = mgr.window.ContextualIdentityService._identities;
+    assert.equal(cisIdentities.length, 0, "no containers created");
+  });
+
+  test("syncBidirectional: workspace with containerTabId 0 and essential bookmarks → container created", async () => {
+    const ws = makeWorkspace("Work", "uuid-work"); // containerTabId: 0
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+
+    // Seed an essential bookmark that appears as new remote (not in manifest)
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://essential.com", "Essential", "Essentials");
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+    const sync = new SyncManager(mgr);
+    // Empty manifest → bookmark is new from remote
+    const r = await sync.syncBidirectional();
+
+    assert.ok(ws.containerTabId > 0, "workspace should have been assigned a container");
+    assert.equal(r.tabsOpened, 1);
+    const tab = mgr.window.gBrowser.tabs[0];
+    assert.ok(tab.hasAttribute("zen-essential"), "tab is essential");
+    assert.equal(tab.getAttribute("usercontextid"), String(ws.containerTabId),
+      "essential tab carries workspace container id");
+  });
+});
+
+// ── Essentials folder — container name encoding ───────────────────────────
+
+describe("Essentials folder — container name encoding", () => {
+  test("syncToBookmarks names folder 'Essentials (<containerName>)' when workspace has a container", async () => {
+    const ws = { ...makeWorkspace("Work", "uuid-work"), containerTabId: 5 };
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    mgr.window.ContextualIdentityService._identities.push(
+      { userContextId: 5, name: "Work Projects", icon: "briefcase", color: "blue" }
+    );
+
+    const tab = makeTab({
+      url: "https://example.com", title: "Ex",
+      attrs: { "zen-workspace-id": ws.uuid, "zen-essential": "" },
+    });
+    mgr.window.gBrowser.tabs.push(tab);
+
+    mgr.tabManager = { getAllTabs: async () => [{
+      url: "https://example.com", title: "Ex", type: "essential",
+      workspace: { id: ws.uuid, name: ws.name }, tab,
+    }]};
+
+    const sync = new SyncManager(mgr);
+    await sync.syncToBookmarks();
+
+    // The Essentials folder should be named "Essentials (Work Projects)"
+    const allFolders = await mgr.window.PlacesUtils.bookmarks.search({ type: "folder" });
+    const essFolder = allFolders.find(f => f.title.startsWith("Essentials"));
+    assert.ok(essFolder, "Essentials folder exists");
+    assert.equal(essFolder.title, "Essentials (Work Projects)",
+      "folder title encodes container name");
+  });
+
+  test("syncToBookmarks: workspace without container → folder is plain 'Essentials'", async () => {
+    const ws = makeWorkspace("Work", "uuid-work"); // containerTabId: 0
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+
+    const tab = makeTab({
+      url: "https://example.com", title: "Ex",
+      attrs: { "zen-workspace-id": ws.uuid, "zen-essential": "" },
+    });
+    mgr.window.gBrowser.tabs.push(tab);
+
+    mgr.tabManager = { getAllTabs: async () => [{
+      url: "https://example.com", title: "Ex", type: "essential",
+      workspace: { id: ws.uuid, name: ws.name }, tab,
+    }]};
+
+    const sync = new SyncManager(mgr);
+    await sync.syncToBookmarks();
+
+    const allFolders = await mgr.window.PlacesUtils.bookmarks.search({ type: "folder" });
+    const essFolder = allFolders.find(f => f.title === "Essentials");
+    assert.ok(essFolder, "plain 'Essentials' folder when no container");
+  });
+
+  test("syncFromBookmarks: 'Essentials (X)' folder → reuses existing container by name", async () => {
+    const mgr = makeManager({ workspaces: [], tabs: [] });
+    mgr.window.ContextualIdentityService._identities.push(
+      { userContextId: 77, name: "My Work Container", icon: "briefcase", color: "red" }
+    );
+
+    const PlacesUtils = mgr.window.PlacesUtils;
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenFolder = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const workFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid, type: "folder", title: "Work" });
+    const essF = await PlacesUtils.bookmarks.insert({ parentGuid: workFolder.guid, type: "folder", title: "Essentials (My Work Container)" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: essF.guid, type: "bookmark", title: "Gmail", url: "https://mail.google.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const ws = mgr.window.gZenWorkspaces.getWorkspaces().find(w => w.name === "Work");
+    assert.equal(ws.containerTabId, 77,
+      "should reuse existing container id 77, not create a new one");
+    assert.equal(mgr.window.ContextualIdentityService._identities.length, 1,
+      "no new containers created — reused existing");
+  });
+
+  test("syncFromBookmarks: 'Essentials (X)' folder → creates container if none matches", async () => {
+    const mgr = makeManager({ workspaces: [], tabs: [] });
+
+    const PlacesUtils = mgr.window.PlacesUtils;
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenFolder = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const workFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid, type: "folder", title: "Work" });
+    const essF = await PlacesUtils.bookmarks.insert({ parentGuid: workFolder.guid, type: "folder", title: "Essentials (Custom Container)" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: essF.guid, type: "bookmark", title: "Gmail", url: "https://mail.google.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const ws = mgr.window.gZenWorkspaces.getWorkspaces().find(w => w.name === "Work");
+    assert.ok(ws.containerTabId > 0, "container was created");
+    const created = mgr.window.ContextualIdentityService._identities;
+    assert.equal(created.length, 1, "one container created");
+    assert.equal(created[0].name, "Custom Container",
+      "container name matches folder suffix, not workspace name");
+  });
+
+  test("syncFromBookmarks: plain 'Essentials' folder → falls back to workspace name for container", async () => {
+    const mgr = makeManager({ workspaces: [], tabs: [] });
+
+    const PlacesUtils = mgr.window.PlacesUtils;
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenFolder = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const workFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid, type: "folder", title: "Work" });
+    const essF = await PlacesUtils.bookmarks.insert({ parentGuid: workFolder.guid, type: "folder", title: "Essentials" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: essF.guid, type: "bookmark", title: "Gmail", url: "https://mail.google.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const ws = mgr.window.gZenWorkspaces.getWorkspaces().find(w => w.name === "Work");
+    assert.ok(ws.containerTabId > 0, "container was created");
+    const created = mgr.window.ContextualIdentityService._identities;
+    assert.equal(created.length, 1);
+    assert.equal(created[0].name, "Work",
+      "container name falls back to workspace name when no suffix in folder title");
+  });
+
+  test("full round-trip: tabs→bookmarks (with container) → bookmarks→tabs reuses container by name", async () => {
+    // Profile A: workspace with container
+    const wsA = { ...makeWorkspace("Dev", "uuid-dev"), containerTabId: 42 };
+    const mgrA = makeManager({ workspaces: [wsA], tabs: [] });
+    mgrA.window.ContextualIdentityService._identities.push(
+      { userContextId: 42, name: "Development", icon: "circle", color: "green" }
+    );
+    const tabA = makeTab({
+      url: "https://github.com", title: "GitHub",
+      attrs: { "zen-workspace-id": wsA.uuid, "zen-essential": "" },
+    });
+    mgrA.window.gBrowser.tabs.push(tabA);
+    mgrA.tabManager = { getAllTabs: async () => [{
+      url: "https://github.com", title: "GitHub", type: "essential",
+      workspace: { id: wsA.uuid, name: wsA.name }, tab: tabA,
+    }]};
+
+    const syncA = new SyncManager(mgrA);
+    await syncA.syncToBookmarks();
+
+    // Verify Essentials folder was named with container
+    const allFolders = await mgrA.window.PlacesUtils.bookmarks.search({ type: "folder" });
+    const essFolder = allFolders.find(f => f.title === "Essentials (Development)");
+    assert.ok(essFolder, "Essentials folder named with container");
+
+    // Profile B: fresh, with a pre-existing "Development" container
+    const mgrB = makeManager({ workspaces: [], tabs: [] });
+    mgrB.window.ContextualIdentityService._identities.push(
+      { userContextId: 99, name: "Development", icon: "circle", color: "green" }
+    );
+    // Copy Profile A's bookmarks into Profile B's PlacesUtils (simulating Firefox Sync)
+    const treeA = await mgrA.window.PlacesUtils.promiseBookmarksTree("toolbar");
+    async function cloneTree(srcNode, destParentGuid, destPU) {
+      for (const child of srcNode.children || []) {
+        if (child.uri != null) {
+          await destPU.bookmarks.insert({
+            parentGuid: destParentGuid, type: "bookmark",
+            title: child.title, url: child.uri,
+          });
+        } else if (child.children !== undefined) {
+          const folder = await destPU.bookmarks.insert({
+            parentGuid: destParentGuid, type: "folder", title: child.title,
+          });
+          await cloneTree(child, folder.guid, destPU);
+        }
+      }
+    }
+    await cloneTree(treeA, "toolbar", mgrB.window.PlacesUtils);
+
+    mgrB.tabManager = { getAllTabs: async () => [] };
+    const syncB = new SyncManager(mgrB);
+    await syncB.syncFromBookmarks();
+
+    const ws = mgrB.window.gZenWorkspaces.getWorkspaces().find(w => w.name === "Dev");
+    assert.ok(ws, "Dev workspace created on profile B");
+    assert.equal(ws.containerTabId, 99,
+      "reused existing 'Development' container (id 99) instead of creating new");
+    assert.equal(mgrB.window.ContextualIdentityService._identities.length, 1,
+      "no new containers created on profile B");
   });
 });
 
@@ -1174,9 +1483,9 @@ describe("Complex scenario — bookmarks → empty tabs (2 workspaces × 15 book
       const spaceFolder = zenFolder.children.find(c => c.title === spaceName);
       assert.ok(spaceFolder, `${spaceName} folder recreated`);
 
-      // Essentials
-      const essF = spaceFolder.children.find(c => c.title === "Essentials");
-      assert.ok(essF, `Essentials in ${spaceName}`);
+      // Essentials (may include container name suffix after round-trip)
+      const essF = spaceFolder.children.find(c => c.title?.startsWith("Essentials"));
+      assert.ok(essF, `Essentials folder in ${spaceName}`);
       const essBms = essF.children.filter(c => c.uri);
       assert.equal(essBms.length, 3, `3 essentials in ${spaceName}`);
       assert.deepEqual(essBms.map(b => b.uri).sort(), essUrls.sort(), `correct essential URLs in ${spaceName}`);

@@ -18,6 +18,8 @@
  * On first install manifest = ∅, which is the correct bootstrap state.
  */
 
+
+
 export class SyncManager {
   constructor(manager) {
     this.manager = manager;
@@ -401,9 +403,33 @@ export class SyncManager {
 
       // Look up or create the matching Zen Space
       let spaceUuid = spaceByName.get(folderName);
+
+      // Essential tabs in Zen are scoped by container (contextual identity).
+      // The container name is encoded in the Essentials folder title:
+      //   "Essentials"            → no specific container
+      //   "Essentials (<name>)"   → container name is <name>
+      let containerName = null;
+      let hasEssentials = false;
+      if (spaceFolder.children) {
+        for (const c of spaceFolder.children) {
+          if (c.uri == null && c.children !== undefined && this._isEssentialsFolder(c.title)) {
+            hasEssentials = true;
+            containerName = this._parseEssentialsFolderName(c.title);
+            break;
+          }
+        }
+      }
+
       if (!spaceUuid && gZenWorkspaces?.createAndSaveWorkspace) {
         try {
-          await gZenWorkspaces.createAndSaveWorkspace(folderName, null, /* dontChange */ true);
+          let containerTabId = 0;
+          if (containerName) {
+            containerTabId = this._findOrCreateContainer(containerName);
+          } else if (hasEssentials) {
+            // No marker yet — fall back to workspace name
+            containerTabId = this._findOrCreateContainer(folderName);
+          }
+          await gZenWorkspaces.createAndSaveWorkspace(folderName, null, /* dontChange */ true, containerTabId);
           for (const ws of gZenWorkspaces.getWorkspaces()) {
             if (ws.name === folderName) {
               spaceUuid = ws.uuid;
@@ -415,6 +441,9 @@ export class SyncManager {
         } catch (e) {
           console.error(`[ZenTabs] Failed to create space "${folderName}":`, e);
         }
+      } else if (spaceUuid && (containerName || hasEssentials)) {
+        // Existing workspace — ensure it has a container for essential tab scoping
+        await this._ensureWorkspaceContainer(spaceUuid, containerName);
       }
 
       if (!spaceUuid) continue;
@@ -436,11 +465,11 @@ export class SyncManager {
           result.bookmarksFound++;
           this._openOrMatchTab(child.uri, spaceUuid, "pinned", "", spaceTabPool, result);
         } else if (child.uri == null && child.children !== undefined) {
-          if (child.title === "Essentials") {
+          if (this._isEssentialsFolder(child.title)) {
             const bms = await this.getAllBookmarksInFolder(child.guid);
             result.bookmarksFound += bms.length;
             for (const bm of bms) {
-              const fullFolder = bm.folder ? `Essentials/${bm.folder}` : "Essentials";
+              const fullFolder = bm.folder ? `${child.title}/${bm.folder}` : child.title;
               this._openOrMatchTab(bm.url, spaceUuid, "essential", fullFolder, spaceTabPool, result);
             }
           } else if (child.title === "Temporary tabs") {
@@ -745,6 +774,12 @@ export class SyncManager {
         spaceResult.bookmarksDeleted++;
       }
 
+      // Ensure workspace has a dedicated container if essential bookmarks
+      // are present, so essential tabs are properly scoped per-workspace.
+      if (B.some(bm => this._inferTabTypeFromFolder(bm.folder) === "essential")) {
+        await this._ensureWorkspaceContainer(spaceUuid, null);
+      }
+
       // ── Step 3: New remote bookmarks → open as tabs ────────────────
       // Bookmarks not in manifest are new from another computer.
       const unmatchedBookmarks = B.filter(bm => !manifestGuids.has(bm.guid));
@@ -872,7 +907,7 @@ export class SyncManager {
     }
     // No Zen folder — fall back to type-based location
     if (tabData.type === "essential") {
-      return await this.getOrCreateFolder(spaceFolderGuid, "Essentials");
+      return await this.getOrCreateFolder(spaceFolderGuid, this._essentialsFolderName(tabData.workspace.id));
     }
     if (tabData.type === "normal") {
       return await this.getOrCreateFolder(spaceFolderGuid, "Temporary tabs");
@@ -887,7 +922,7 @@ export class SyncManager {
   _subfolderNameForTab(tabData) {
     const folderPath = tabData.folderPath;
     if (folderPath && folderPath.length > 0) return folderPath.join("/");
-    if (tabData.type === "essential") return "Essentials";
+    if (tabData.type === "essential") return this._essentialsFolderName(tabData.workspace.id);
     if (tabData.type === "normal") return "Temporary tabs";
     return ""; // pinned with no folder → space root
   }
@@ -903,9 +938,126 @@ export class SyncManager {
    */
   _inferTabTypeFromFolder(folder) {
     if (!folder || folder === "") return "pinned";
-    if (folder === "Essentials" || folder.startsWith("Essentials/")) return "essential";
+    if (this._isEssentialsFolder(folder) || folder.startsWith("Essentials/")) return "essential";
     if (folder === "Temporary tabs" || folder.startsWith("Temporary tabs/")) return "normal";
     return "pinned"; // named folder = pinned tab group
+  }
+
+  // ── Container helpers (essential-tab scoping) ───────────────────────────
+
+  /**
+   * Look up a container identity by its userContextId.
+   * @returns {{ userContextId, name, icon, color } | null}
+   */
+  _getContainerIdentity(containerTabId) {
+    try {
+      const CIS = this.manager.window.ContextualIdentityService
+        ?? globalThis.ContextualIdentityService;
+      if (CIS?.getPublicIdentities) {
+        return CIS.getPublicIdentities().find(
+          id => id.userContextId === containerTabId
+        ) ?? null;
+      }
+    } catch (e) { /* non-fatal */ }
+    return null;
+  }
+
+  /**
+   * Find an existing container by name.
+   * @returns {{ userContextId, name, icon, color } | null}
+   */
+  _findContainerByName(name) {
+    try {
+      const CIS = this.manager.window.ContextualIdentityService
+        ?? globalThis.ContextualIdentityService;
+      if (CIS?.getPublicIdentities) {
+        return CIS.getPublicIdentities().find(id => id.name === name) ?? null;
+      }
+    } catch (e) { /* non-fatal */ }
+    return null;
+  }
+
+  /**
+   * Find an existing container by name, or create one if it doesn't exist.
+   * @param {string} name - container display name to match/create
+   * @returns {number} userContextId (0 if creation fails)
+   */
+  _findOrCreateContainer(name) {
+    const existing = this._findContainerByName(name);
+    if (existing) return existing.userContextId;
+    try {
+      const CIS = this.manager.window.ContextualIdentityService
+        ?? globalThis.ContextualIdentityService;
+      if (CIS?.create) {
+        const identity = CIS.create(name, "circle", "blue");
+        return identity.userContextId;
+      }
+    } catch (e) {
+      this.log("Could not create container:", name, e.message);
+    }
+    return 0;
+  }
+
+  /**
+   * Compute the Essentials folder title for a workspace.
+   * If the workspace has a container, the name is encoded as
+   * "Essentials (<containerName>)". Otherwise plain "Essentials".
+   */
+  _essentialsFolderName(spaceUuid) {
+    const gZenWorkspaces = this.manager.window.gZenWorkspaces;
+    const ws = gZenWorkspaces?.getWorkspaceFromId(spaceUuid);
+    if (ws?.containerTabId) {
+      const identity = this._getContainerIdentity(ws.containerTabId);
+      if (identity?.name) return `Essentials (${identity.name})`;
+    }
+    return "Essentials";
+  }
+
+  /**
+   * Check whether a folder title represents the Essentials folder
+   * (with or without a container suffix).
+   */
+  _isEssentialsFolder(title) {
+    return title === "Essentials" || title.startsWith("Essentials (");
+  }
+
+  /**
+   * Extract the container name from an Essentials folder title.
+   * Returns null if the title is plain "Essentials" (no container encoded).
+   * @param {string} title - e.g. "Essentials (Work)"
+   * @returns {string|null}
+   */
+  _parseEssentialsFolderName(title) {
+    const match = title.match(/^Essentials \((.+)\)$/);
+    return match ? match[1] : null;
+  }
+
+  /**
+   * Ensure a workspace has a dedicated container for essential-tab scoping.
+   * If the workspace already has a non-zero containerTabId, this is a no-op.
+   * Otherwise looks up a container by name (preferring containerName if given,
+   * falling back to workspace name), or creates one.
+   *
+   * @param {string} spaceUuid
+   * @param {string|null} containerName - preferred container name from marker
+   * @returns {number} the (possibly new) containerTabId
+   */
+  async _ensureWorkspaceContainer(spaceUuid, containerName = null) {
+    const gZenWorkspaces = this.manager.window.gZenWorkspaces;
+    if (!gZenWorkspaces) return 0;
+    const ws = gZenWorkspaces.getWorkspaceFromId(spaceUuid);
+    if (!ws) return 0;
+    if (ws.containerTabId) return ws.containerTabId;
+
+    const name = containerName || ws.name;
+    const newId = this._findOrCreateContainer(name);
+    if (newId) {
+      ws.containerTabId = newId;
+      if (gZenWorkspaces.saveWorkspace) {
+        await gZenWorkspaces.saveWorkspace(ws);
+      }
+    }
+    return newId;
   }
 
   async getOrCreateFolder(parentId, title) {

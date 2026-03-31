@@ -207,6 +207,30 @@ export function makeGZenWorkspaces(workspaces = [], allTabs = []) {
       if (!dontChange) _activeUuid = uuid;
       return ws;
     },
+    async saveWorkspace(workspaceData) {
+      const existing = byUuid.get(workspaceData.uuid);
+      if (existing) Object.assign(existing, workspaceData);
+    },
+  };
+}
+
+// ── Zen Folders (gZenFolders) ───────────────────────────────────────────
+
+// ── ContextualIdentityService (Firefox containers) ──────────────────────
+
+export function makeContextualIdentityService(initialIdentities = []) {
+  let _nextId = 100;
+  const _identities = [...initialIdentities];
+  return {
+    create(name, icon, color) {
+      const identity = { userContextId: _nextId++, name, icon, color };
+      _identities.push(identity);
+      return identity;
+    },
+    getPublicIdentities() {
+      return [..._identities];
+    },
+    _identities,
   };
 }
 
@@ -285,6 +309,7 @@ export function makeManager({
   const gBrowser    = makeGBrowser(tabs);
   const gZenWorkspaces = makeGZenWorkspaces(workspaces, tabs);
   const gZenFolders    = makeGZenFolders();
+  const ContextualIdentityService = makeContextualIdentityService();
 
   // Expose Services as a global for modules that reference it directly
   // (SyncManager calls Services.prefs and Services.scriptSecurityManager)
@@ -320,6 +345,7 @@ export function makeManager({
       gBrowser,
       gZenWorkspaces,
       gZenFolders,
+      ContextualIdentityService,
       Services,
       setInterval:   (fn, ms) => null,
       clearInterval: () => {},
