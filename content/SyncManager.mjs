@@ -467,17 +467,25 @@ export class SyncManager {
   }
 
   /**
-   * Restore a named bookmark subfolder as Zen folder(s).
+   * Restore a named bookmark subfolder as nested Zen folder(s).
    *
-   * Strategy: create a Zen pinned-tab folder for every node that has DIRECT
-   * bookmark children, then recurse into any sub-folder children.  This
-   * preserves the full hierarchy: a bookmark tree like
-   *   Work/ → React/ → url1, url2          (no direct bookmarks in Work/)
-   *                  → Vue/  → url3
-   * produces two Zen folders: "React" with [url1, url2] and "Vue" with [url3],
-   * and NO flat "Work" folder — matching what the user sees in Zen.
+   * Strategy: create a Zen folder for every node, mirroring the bookmark
+   * hierarchy as nested Zen folders.  Each node with DIRECT bookmark children
+   * creates a folder containing the corresponding tabs.  Nodes with only
+   * sub-folders (no direct bookmarks) create an empty container folder so the
+   * nesting is preserved.  Sub-folders recurse with `parentFolder` set to the
+   * folder just created, so Zen renders them as nested groups.
+   *
+   * Example:  Work/ → url1, React/ → url2, url3
+   * produces: Zen folder "Work" [url1] containing subfolder "React" [url2, url3].
+   *
+   * @param {object}      folderChild  - Bookmark tree node (from promiseBookmarksTree)
+   * @param {string}      spaceUuid    - Target Zen Space UUID
+   * @param {Set<string>} existingUrls - URLs already open (dedup guard)
+   * @param {object}      result       - Mutation target for counters
+   * @param {object|null} parentFolder - Parent Zen folder to nest under (null = root)
    */
-  async _openRestoredFolder(folderChild, spaceUuid, existingUrls, result) {
+  async _openRestoredFolder(folderChild, spaceUuid, existingUrls, result, parentFolder = null) {
     const { gBrowser } = this.manager.window;
     const gZenFolders = this.manager.window.gZenFolders;
 
@@ -486,6 +494,8 @@ export class SyncManager {
     // Partition direct bookmark children from sub-folder children
     const directUrls = children.filter(c => c.uri != null).map(c => c.uri);
     const subFolders  = children.filter(c => c.uri == null && c.children !== undefined);
+
+    let createdFolder = null;
 
     // Create a Zen folder for this node's direct bookmark children (if any)
     if (directUrls.length > 0) {
@@ -516,7 +526,9 @@ export class SyncManager {
         }
         if (createdTabs.length > 0) {
           try {
-            gZenFolders.createFolder(createdTabs, { label: folderChild.title, workspaceId: spaceUuid });
+            const opts = { label: folderChild.title, workspaceId: spaceUuid };
+            if (parentFolder) opts.parentFolder = parentFolder;
+            createdFolder = gZenFolders.createFolder(createdTabs, opts);
             result.tabsCreated += createdTabs.length;
           } catch (e) {
             console.error(`[ZenTabs] Error creating Zen folder "${folderChild.title}":`, e);
@@ -527,11 +539,22 @@ export class SyncManager {
           }
         }
       }
+    } else if (subFolders.length > 0 && gZenFolders) {
+      // No direct bookmarks but has sub-folders: create an empty container
+      // folder so that sub-folder nesting is preserved in Zen.
+      try {
+        const opts = { label: folderChild.title, workspaceId: spaceUuid };
+        if (parentFolder) opts.parentFolder = parentFolder;
+        createdFolder = gZenFolders.createFolder([], opts);
+      } catch (e) {
+        this.log(`Could not create container folder "${folderChild.title}":`, e.message);
+      }
     }
 
-    // Recurse into each sub-folder — each becomes its own Zen folder group
+    // Recurse into each sub-folder, nesting under the folder we just created
+    const nextParent = createdFolder || parentFolder;
     for (const sub of subFolders) {
-      await this._openRestoredFolder(sub, spaceUuid, existingUrls, result);
+      await this._openRestoredFolder(sub, spaceUuid, existingUrls, result, nextParent);
     }
   }
 

@@ -220,7 +220,12 @@ export function makeGZenFolders() {
       for (const tab of tabs) {
         tab.pinned = true;
       }
-      const entry = { label: options.label, workspaceId: options.workspaceId, tabs: [...tabs] };
+      const entry = {
+        label: options.label,
+        workspaceId: options.workspaceId,
+        parentFolder: options.parentFolder || null,
+        tabs: [...tabs],
+      };
       createdFolders.push(entry);
       return entry;
     },

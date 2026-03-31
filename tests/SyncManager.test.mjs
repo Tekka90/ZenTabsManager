@@ -498,12 +498,9 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     assert.equal(folders[0].tabs[0].pinned, true, "createFolder pins its tabs");
   });
 
-  test("nested bookmark subfolders → each leaf folder becomes its own Zen folder (regression: nested items were silently skipped)", async () => {
-    // Regression: _openRestoredFolder previously did `if (!bm.uri) continue`
-    // which skipped nested subfolders.  Now we recurse and create a Zen folder
-    // per node that has direct bookmark children.
+  test("nested bookmark subfolders → intermediate empty folder becomes container, leaf folder is nested inside it", async () => {
     // Structure: Zen/Personal/Work/React/{react.com, vue.com}
-    // Expected:  one Zen folder "React" with two tabs (Work has no direct bookmarks)
+    // Expected:  container folder "Work" (no tabs) containing nested folder "React" with two tabs
     const ws = makeWorkspace("Personal", "uuid-personal");
     const mgr = makeManager({ workspaces: [ws], tabs: [] });
     const PlacesUtils = mgr.window.PlacesUtils;
@@ -521,17 +518,23 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     await sync.syncFromBookmarks();
 
     const folders = mgr.window.gZenFolders._createdFolders;
-    assert.equal(folders.length, 1, "one Zen folder for 'React' (Work has no direct bookmarks)");
-    assert.equal(folders[0].label, "React");
-    assert.equal(folders[0].tabs.length, 2, "both bookmarks present");
-    const tabUrls = folders[0].tabs.map(t => t.linkedBrowser.currentURI.spec);
+    assert.equal(folders.length, 2, "two Zen folders: container 'Work' + nested 'React'");
+    const workF  = folders.find(f => f.label === "Work");
+    const reactF = folders.find(f => f.label === "React");
+    assert.ok(workF,  "Work container folder exists");
+    assert.ok(reactF, "React folder exists");
+    assert.equal(workF.tabs.length, 0, "Work is an empty container");
+    assert.equal(workF.parentFolder, null, "Work is at root (no parent)");
+    assert.strictEqual(reactF.parentFolder, workF, "React is nested inside Work");
+    assert.equal(reactF.tabs.length, 2, "both bookmarks present in React");
+    const tabUrls = reactF.tabs.map(t => t.linkedBrowser.currentURI.spec);
     assert.ok(tabUrls.includes("https://react.com"), "React URL present");
     assert.ok(tabUrls.includes("https://vue.com"),   "Vue URL present");
   });
 
-  test("multiple nested subfolders → each becomes its own separate Zen folder", async () => {
+  test("multiple nested subfolders → each nested under common parent", async () => {
     // Structure: Zen/Personal/Work/React/{url1}  and  Zen/Personal/Work/Vue/{url2}
-    // Expected:  TWO Zen folders: "React" with [url1] and "Vue" with [url2]
+    // Expected:  container "Work" with two nested folders: "React" and "Vue"
     const ws = makeWorkspace("Personal", "uuid-personal");
     const mgr = makeManager({ workspaces: [ws], tabs: [] });
     const PlacesUtils = mgr.window.PlacesUtils;
@@ -550,13 +553,14 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     await sync.syncFromBookmarks();
 
     const folders = mgr.window.gZenFolders._createdFolders;
-    assert.equal(folders.length, 2, "two separate Zen folders, one per subfolder");
-    const labels = folders.map(f => f.label).sort();
-    assert.deepEqual(labels, ["React", "Vue"]);
+    assert.equal(folders.length, 3, "three Zen folders: container 'Work' + 'React' + 'Vue'");
+    const workF  = folders.find(f => f.label === "Work");
     const reactF = folders.find(f => f.label === "React");
     const vueF   = folders.find(f => f.label === "Vue");
-    assert.equal(reactF.tabs[0].linkedBrowser.currentURI.spec, "https://react.com");
-    assert.equal(vueF.tabs[0].linkedBrowser.currentURI.spec,   "https://vue.com");
+    assert.ok(workF, "Work container exists");
+    assert.equal(workF.parentFolder, null, "Work is at root");
+    assert.strictEqual(reactF.parentFolder, workF, "React nested inside Work");
+    assert.strictEqual(vueF.parentFolder, workF, "Vue nested inside Work");
   });
 
   test("fresh install — no spaces — creates the space and opens tabs", async () => {
@@ -608,6 +612,70 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     assert.equal(r.spacesCreated, 2, "should have created 2 spaces");
     assert.equal(r.tabsCreated, 2,   "should have opened 2 tabs");
     assert.equal(mgr.window.gZenWorkspaces.getWorkspaces().length, 2);
+  });
+
+  test("folder with direct bookmarks AND subfolders → subfolder nested inside parent", async () => {
+    // Structure: Zen/Personal/Work/{url1, React/{url2, url3}}
+    // Expected:  "Work" folder with [url1], "React" nested inside "Work" with [url2, url3]
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenFolder   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid,      type: "folder", title: "Zen" });
+    const spaceFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid,   type: "folder", title: "Personal" });
+    const workFolder  = await PlacesUtils.bookmarks.insert({ parentGuid: spaceFolder.guid, type: "folder", title: "Work" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: workFolder.guid,  type: "bookmark", title: "Work",  url: "https://work.com" });
+    const reactFolder = await PlacesUtils.bookmarks.insert({ parentGuid: workFolder.guid,  type: "folder", title: "React" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: reactFolder.guid, type: "bookmark", title: "React", url: "https://react.com" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: reactFolder.guid, type: "bookmark", title: "Vue",   url: "https://vue.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const folders = mgr.window.gZenFolders._createdFolders;
+    assert.equal(folders.length, 2, "two Zen folders: 'Work' + nested 'React'");
+    const workF  = folders.find(f => f.label === "Work");
+    const reactF = folders.find(f => f.label === "React");
+    assert.ok(workF,  "Work folder exists");
+    assert.ok(reactF, "React folder exists");
+    assert.equal(workF.tabs.length, 1, "Work has one direct tab");
+    assert.equal(workF.tabs[0].linkedBrowser.currentURI.spec, "https://work.com");
+    assert.equal(workF.parentFolder, null, "Work is at root");
+    assert.strictEqual(reactF.parentFolder, workF, "React is nested inside Work");
+    assert.equal(reactF.tabs.length, 2, "React has two tabs");
+  });
+
+  test("deeply nested bookmark hierarchy → three-level nesting", async () => {
+    // Structure: Zen/Personal/A/{url1, B/{url2, C/{url3}}}
+    // Expected: A[url1] → B[url2] → C[url3] with correct parent chain
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenFolder   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid,      type: "folder", title: "Zen" });
+    const spaceFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid,   type: "folder", title: "Personal" });
+    const folderA     = await PlacesUtils.bookmarks.insert({ parentGuid: spaceFolder.guid, type: "folder", title: "A" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: folderA.guid, type: "bookmark", title: "a", url: "https://a.com" });
+    const folderB     = await PlacesUtils.bookmarks.insert({ parentGuid: folderA.guid,     type: "folder", title: "B" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: folderB.guid, type: "bookmark", title: "b", url: "https://b.com" });
+    const folderC     = await PlacesUtils.bookmarks.insert({ parentGuid: folderB.guid,     type: "folder", title: "C" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: folderC.guid, type: "bookmark", title: "c", url: "https://c.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const folders = mgr.window.gZenFolders._createdFolders;
+    assert.equal(folders.length, 3, "three nested Zen folders");
+    const fA = folders.find(f => f.label === "A");
+    const fB = folders.find(f => f.label === "B");
+    const fC = folders.find(f => f.label === "C");
+    assert.equal(fA.parentFolder, null, "A is at root");
+    assert.strictEqual(fB.parentFolder, fA, "B nested inside A");
+    assert.strictEqual(fC.parentFolder, fB, "C nested inside B");
   });
 });
 
