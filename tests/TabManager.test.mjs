@@ -410,3 +410,41 @@ describe("Metadata cache", () => {
     assert.equal(result[0].url, "https://cached.com");
   });
 });
+
+// ── URL extraction (_extractTabUrl) ───────────────────────────────────────
+
+describe("URL extraction (_extractTabUrl)", () => {
+  test("returns currentURI when available", () => {
+    const tab = makeTab({ url: "https://example.com" });
+    const mgr = makeManager({ tabs: [tab] });
+    const tm = new TabManager(mgr);
+    assert.equal(tm._extractTabUrl(tab), "https://example.com");
+  });
+
+  test("falls back to userTypedValue when currentURI is about:blank", () => {
+    const tab = makeTab({ url: "about:blank" });
+    tab.linkedBrowser.userTypedValue = "https://pending.com";
+    const mgr = makeManager({ tabs: [tab] });
+    const tm = new TabManager(mgr);
+    assert.equal(tm._extractTabUrl(tab), "https://pending.com");
+  });
+
+  test("falls back to SessionStore when currentURI is about:blank and no userTypedValue", () => {
+    const tab = makeTab({ url: "about:blank" });
+    const mgr = makeManager({ tabs: [tab] });
+    mgr.window.SessionStore = {
+      getTabState: () => JSON.stringify({
+        entries: [{ url: "https://restored.com" }]
+      })
+    };
+    const tm = new TabManager(mgr);
+    assert.equal(tm._extractTabUrl(tab), "https://restored.com");
+  });
+
+  test("returns about:blank when no fallback available", () => {
+    const tab = makeTab({ url: "about:blank" });
+    const mgr = makeManager({ tabs: [tab] });
+    const tm = new TabManager(mgr);
+    assert.equal(tm._extractTabUrl(tab), "about:blank");
+  });
+});

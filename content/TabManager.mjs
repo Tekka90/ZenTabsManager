@@ -71,7 +71,7 @@ export class TabManager {
       folderLevel: tab.group?.level ?? -1,
       folderCollapsed: tab.group?.collapsed ?? false,
       title: tab.label || tab.getAttribute("label") || "Untitled",
-      url: browser.currentURI?.spec || "about:blank",
+      url: this._extractTabUrl(tab),
       favicon: tab.image || null,
       visible: tab.visible !== false,
       hidden: tab.hidden,
@@ -82,6 +82,34 @@ export class TabManager {
       createdAt: tab.createdAt || Date.now(),
       ...this.getTabAge(tab)
     };
+  }
+
+  /**
+   * Extract the best available URL for a tab.
+   *
+   * During session restore, or for tabs in inactive Zen Spaces, the browser's
+   * currentURI is "about:blank".  In those cases we consult SessionStore for
+   * the real URL that will be loaded when the tab is restored/activated.
+   */
+  _extractTabUrl(tab) {
+    const browser = tab.linkedBrowser;
+    const uri = browser?.currentURI?.spec;
+    if (uri && uri !== "about:blank") return uri;
+
+    // Pending tabs: Firefox stores a userTypedValue on the browser
+    if (browser?.userTypedValue) return browser.userTypedValue;
+
+    // SessionStore keeps the full tab state including the URL
+    try {
+      const ss = this.manager.window.SessionStore;
+      if (ss?.getTabState) {
+        const state = JSON.parse(ss.getTabState(tab));
+        const lastEntry = state?.entries?.[state.entries.length - 1];
+        if (lastEntry?.url) return lastEntry.url;
+      }
+    } catch (e) { /* non-fatal */ }
+
+    return uri || "about:blank";
   }
 
   /**

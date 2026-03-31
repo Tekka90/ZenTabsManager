@@ -72,24 +72,43 @@ class ZenTabsManager {
   }
 
   async waitForBrowser() {
-    return new Promise((resolve) => {
+    // 1. Wait for gBrowser.tabs to exist
+    await new Promise((resolve) => {
       if (this.window.gBrowser?.tabs) {
         resolve();
         return;
       }
-      
       const interval = setInterval(() => {
         if (this.window.gBrowser?.tabs) {
           clearInterval(interval);
           resolve();
         }
       }, 100);
-      
       setTimeout(() => {
         clearInterval(interval);
         resolve();
       }, 10000);
     });
+
+    // 2. Wait for session restore to finish so that tab URLs are populated.
+    //    Without this, tabs still show about:blank during lazy restore and
+    //    syncToBookmarks skips them all.
+    await new Promise((resolve) => {
+      // SessionStore sets __SSi on the window once restore is complete
+      if (this.window.__SSi !== undefined) {
+        resolve();
+        return;
+      }
+      const onRestore = () => {
+        this.window.removeEventListener("SSWindowStateReady", onRestore);
+        resolve();
+      };
+      this.window.addEventListener("SSWindowStateReady", onRestore);
+      // Safety timeout — don't block forever if the event already fired
+      setTimeout(resolve, 15000);
+    });
+
+    console.log("[ZenTabs] Browser and session restore ready");
   }
 
   async initializeManagers() {
