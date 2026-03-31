@@ -297,7 +297,10 @@ export class SyncManager {
 
       // Build a pool of existing bookmarks for this space that can be matched
       // to tabs. Each bookmark can only be matched once (consumed from pool).
-      const bookmarkPool = [...(bmBySpace.get(spaceId) ?? [])];
+      // Normalize folder names so old "Essentials" matches new "Essentials (Name)".
+      const bookmarkPool = (bmBySpace.get(spaceId) ?? []).map(
+        bm => ({ ...bm, folder: this._normalizeFolder(bm.folder, spaceId) })
+      );
 
       for (const tabData of syncTabs) {
         const folderGuid = await this.getBookmarkFolderForTab(spaceFolderGuid, tabData);
@@ -707,7 +710,8 @@ export class SyncManager {
       // Tabs not accounted for in the manifest are new local opens.
       // We match manifest entries to tabs by URL + folder (consuming one
       // manifest entry per tab) to find truly new tabs.
-      const unmatchedManifestKeys = M.map(e => ({ url: e.url, folder: e.folder })); // mutable copy
+      // Normalize manifest folders so old "Essentials" matches the current canonical name.
+      const unmatchedManifestKeys = M.map(e => ({ url: e.url, folder: this._normalizeFolder(e.folder, spaceUuid) }));
       const newLocalTabs = [];
       for (const tabData of T) {
         const tabFolder = this._subfolderNameForTab(tabData);
@@ -746,7 +750,7 @@ export class SyncManager {
 
       const manifestKeyCounts = new Map();
       for (const me of M) {
-        const key = _tabKey(me.url, me.folder);
+        const key = _tabKey(me.url, this._normalizeFolder(me.folder, spaceUuid));
         manifestKeyCounts.set(key, (manifestKeyCounts.get(key) ?? 0) + 1);
       }
 
@@ -799,8 +803,9 @@ export class SyncManager {
 
       for (const bm of unmatchedBookmarks) {
         // Try to match to an unconsumed tab with same URL and same folder
-        const tabType = this._inferTabTypeFromFolder(bm.folder);
-        const poolIdx = unmatchedTabPool.findIndex(e => !e.consumed && e.url === bm.url && e.folder === bm.folder);
+        const bmFolder = this._normalizeFolder(bm.folder, spaceUuid);
+        const tabType = this._inferTabTypeFromFolder(bmFolder);
+        const poolIdx = unmatchedTabPool.findIndex(e => !e.consumed && e.url === bm.url && e.folder === bmFolder);
         if (poolIdx !== -1) {
           unmatchedTabPool[poolIdx].consumed = true;
           continue; // already open
@@ -875,10 +880,11 @@ export class SyncManager {
       const tabPool = updatedTabs.map(td => ({ ...td, folder: this._subfolderNameForTab(td), consumed: false }));
 
       for (const bm of updatedB) {
-        const poolIdx = tabPool.findIndex(e => !e.consumed && e.url === bm.url && e.folder === bm.folder);
+        const bmFolder = this._normalizeFolder(bm.folder, spaceUuid);
+        const poolIdx = tabPool.findIndex(e => !e.consumed && e.url === bm.url && e.folder === bmFolder);
         if (poolIdx !== -1) {
           const td = tabPool[poolIdx];
-          newEntries.push({ url: bm.url, guid: bm.guid, folder: bm.folder, type: td.type });
+          newEntries.push({ url: bm.url, guid: bm.guid, folder: bmFolder, type: td.type });
           tabPool[poolIdx].consumed = true;
         }
       }
@@ -938,8 +944,9 @@ export class SyncManager {
    */
   _inferTabTypeFromFolder(folder) {
     if (!folder || folder === "") return "pinned";
-    if (this._isEssentialsFolder(folder) || folder.startsWith("Essentials/")) return "essential";
-    if (folder === "Temporary tabs" || folder.startsWith("Temporary tabs/")) return "normal";
+    const topLevel = folder.split("/")[0];
+    if (this._isEssentialsFolder(topLevel)) return "essential";
+    if (topLevel === "Temporary tabs") return "normal";
     return "pinned"; // named folder = pinned tab group
   }
 
@@ -1030,6 +1037,24 @@ export class SyncManager {
    */
   _isEssentialsFolder(title) {
     return title === "Essentials" || title.startsWith("Essentials (");
+  }
+
+  /**
+   * Normalize a bookmark `folder` path for a given space so that any variant
+   * of the Essentials folder ("Essentials", "Essentials (OldName)", etc.) is
+   * replaced with the canonical name from `_essentialsFolderName(spaceUuid)`.
+   *
+   * This prevents folder-rename drift from causing infinite bookmark creation
+   * when the container name changes or the feature is first enabled.
+   */
+  _normalizeFolder(folder, spaceUuid) {
+    if (!folder) return folder;
+    // Split on "/" to handle nested paths like "Essentials/sub"
+    const parts = folder.split("/");
+    if (this._isEssentialsFolder(parts[0])) {
+      parts[0] = this._essentialsFolderName(spaceUuid);
+    }
+    return parts.join("/");
   }
 
   /**

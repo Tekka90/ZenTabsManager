@@ -1780,3 +1780,92 @@ describe("Complex scenario — tabs → empty bookmarks (2 workspaces × 15 tabs
     assert.equal(sharedTabs.length, 6, "shared.com: 6 tabs (3 per workspace)");
   });
 });
+
+// ── Folder normalization ────────────────────────────────────────────────────
+
+describe("Folder normalization (_normalizeFolder)", () => {
+  test("normalizes bare 'Essentials' to canonical name with container", () => {
+    const ws = makeWorkspace("Dev", "uuid-dev");
+    ws.containerTabId = 1;
+    const mgr = makeManager({ workspaces: [ws] });
+    // Seed CIS with a container matching the workspace's containerTabId
+    mgr.window.ContextualIdentityService._identities.push(
+      { userContextId: 1, name: "Dev-Container", icon: "circle", color: "blue" }
+    );
+    const sync = new SyncManager(mgr);
+    const result = sync._normalizeFolder("Essentials", "uuid-dev");
+    assert.equal(result, "Essentials (Dev-Container)");
+  });
+
+  test("normalizes old Essentials variant to canonical name", () => {
+    const ws = makeWorkspace("Dev", "uuid-dev");
+    ws.containerTabId = 1;
+    const mgr = makeManager({ workspaces: [ws] });
+    mgr.window.ContextualIdentityService._identities.push(
+      { userContextId: 1, name: "Dev-Container", icon: "circle", color: "blue" }
+    );
+    const sync = new SyncManager(mgr);
+    const result = sync._normalizeFolder("Essentials (OldName)", "uuid-dev");
+    assert.equal(result, "Essentials (Dev-Container)");
+  });
+
+  test("normalizes nested Essentials path", () => {
+    const ws = makeWorkspace("Dev", "uuid-dev");
+    ws.containerTabId = 1;
+    const mgr = makeManager({ workspaces: [ws] });
+    mgr.window.ContextualIdentityService._identities.push(
+      { userContextId: 1, name: "Dev-Container", icon: "circle", color: "blue" }
+    );
+    const sync = new SyncManager(mgr);
+    const result = sync._normalizeFolder("Essentials/subfolder", "uuid-dev");
+    assert.equal(result, "Essentials (Dev-Container)/subfolder");
+  });
+
+  test("does not normalize non-Essentials folders", () => {
+    const ws = makeWorkspace("Dev", "uuid-dev");
+    const mgr = makeManager({ workspaces: [ws] });
+    const sync = new SyncManager(mgr);
+    assert.equal(sync._normalizeFolder("Temporary tabs", "uuid-dev"), "Temporary tabs");
+    assert.equal(sync._normalizeFolder("MyFolder", "uuid-dev"), "MyFolder");
+    assert.equal(sync._normalizeFolder("", "uuid-dev"), "");
+  });
+
+  test("syncToBookmarks does not duplicate when old Essentials folder exists", async () => {
+    const ws = makeWorkspace("Dev", "uuid-dev");
+    ws.containerTabId = 1;
+
+    const essentialTab = makeTab({
+      url: "https://essential.com", title: "Essential",
+      pinned: true,
+      attrs: { "zen-essential": "true", "zen-workspace-id": "uuid-dev" }
+    });
+
+    const mgr = makeManager({ workspaces: [ws], tabs: [essentialTab] });
+    mgr.window.ContextualIdentityService._identities.push(
+      { userContextId: 1, name: "Dev-Container", icon: "circle", color: "blue" }
+    );
+
+    // Init TabManager so syncToBookmarks can enumerate tabs
+    const { TabManager } = await import("../content/TabManager.mjs");
+    mgr.tabManager = new TabManager(mgr);
+    await mgr.tabManager.init();
+
+    const sync = new SyncManager(mgr);
+    await sync.init();
+
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    // Seed old-style "Essentials" folder with the same bookmark
+    const zenFolder = await PlacesUtils.bookmarks.insert({ parentGuid: "toolbar", type: "folder", title: "Zen" });
+    const spaceFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolder.guid, type: "folder", title: "Dev" });
+    const oldEsFolder = await PlacesUtils.bookmarks.insert({ parentGuid: spaceFolder.guid, type: "folder", title: "Essentials" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: oldEsFolder.guid, type: "bookmark", title: "Essential", url: "https://essential.com" });
+
+    // Run syncToBookmarks twice
+    const result1 = await sync.syncToBookmarks();
+    const result2 = await sync.syncToBookmarks();
+
+    // Second run should not create any new bookmarks
+    assert.equal(result2.bookmarksCreated, 0, "no duplicates on second sync");
+  });
+});
