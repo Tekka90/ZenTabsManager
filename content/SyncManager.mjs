@@ -5,11 +5,15 @@
  * A local manifest (stored in Services.prefs) records what both sides last agreed on.
  * Comparing manifest vs. current tabs vs. current bookmarks drives all decisions.
  *
- * Decision table (per URL per Space):
+ * Decision table (per entry per Space):
  *   in T, not in M            → opened locally since last sync  → push to bookmarks
  *   in M, not in T, in B      → closed locally since last sync  → delete from bookmarks
  *   in B, not in M, not in T  → added on another computer       → open as tab
  *   in M, not in B, in T      → deleted on another computer     → close tab (if pref enabled)
+ *
+ * IMPORTANT: URL is NOT treated as a unique key. Duplicate URLs within a space,
+ * folder, or even the same subfolder are perfectly valid. The sync operates on
+ * bookmark entries (identified by GUID) and tab instances — not on URLs.
  *
  * On first install manifest = ∅, which is the correct bootstrap state.
  */
@@ -17,7 +21,6 @@
 export class SyncManager {
   constructor(manager) {
     this.manager = manager;
-    this.bookmarkMap = new Map(); // URL -> bookmark GUID
     this.lastSyncTime = 0;
     this.syncInProgress = false;
     this.log("SyncManager created");
@@ -25,7 +28,6 @@ export class SyncManager {
 
   async init() {
     this.log("SyncManager initializing...");
-    await this.rebuildBookmarkCache();
     this.setupBookmarkObserver();
     this.log("SyncManager initialized");
   }
@@ -34,7 +36,18 @@ export class SyncManager {
 
   /**
    * Load the sync manifest from prefs.
-   * @returns {Map<string, Set<string>>} spaceUuid → Set of URLs
+   *
+   * Format v2: Map<spaceUuid, Array<{url, guid, folder, type}>>
+   *   - Each entry represents a single tab↔bookmark pairing that was agreed
+   *     on at the end of the last sync.
+   *   - `guid` is the Places bookmark GUID.
+   *   - `folder` is the subfolder path string (e.g. "Essentials", "My Projects")
+   *     or "" for space root.
+   *   - `type` is the tab type: "essential" | "pinned" | "normal".
+   *
+   * Legacy format (v1): Map<spaceUuid, string[]> (flat URL arrays / sets).
+   *   - Detected on load and silently migrated to v2 by discarding (treated as
+   *     empty manifest, which triggers a full bootstrap sync).
    */
   loadManifest() {
     try {
@@ -42,8 +55,17 @@ export class SyncManager {
       if (!prefBranch.prefHasUserValue("syncManifest")) return new Map();
       const stored = JSON.parse(prefBranch.getStringPref("syncManifest", "{}"));
       const manifest = new Map();
-      for (const [uuid, urls] of Object.entries(stored)) {
-        manifest.set(uuid, new Set(urls));
+      for (const [uuid, entries] of Object.entries(stored)) {
+        if (!Array.isArray(entries)) {
+          // Legacy v1 format (Set<url> serialised as string[]) — discard
+          continue;
+        }
+        // Validate that entries look like v2 objects (have `guid` field)
+        if (entries.length > 0 && typeof entries[0] === "string") {
+          // Still legacy — array of URL strings
+          continue;
+        }
+        manifest.set(uuid, entries);
       }
       return manifest;
     } catch (e) {
@@ -54,13 +76,13 @@ export class SyncManager {
 
   /**
    * Persist the sync manifest to prefs.
-   * @param {Map<string, Set<string>>} manifest
+   * @param {Map<string, Array<{url, guid, folder, type}>>} manifest
    */
   saveManifest(manifest) {
     try {
       const obj = {};
-      for (const [uuid, urls] of manifest) {
-        obj[uuid] = [...urls];
+      for (const [uuid, entries] of manifest) {
+        obj[uuid] = entries;
       }
       Services.prefs.getBranch("zentabs.").setStringPref("syncManifest", JSON.stringify(obj));
     } catch (e) {
@@ -68,33 +90,14 @@ export class SyncManager {
     }
   }
 
-  /**
-   * Rebuild bookmark cache from Places database
-   */
-  async rebuildBookmarkCache() {
-    this.bookmarkMap.clear();
-    
-    try {
-      // Get Zen folder bookmarks
-      const zenFolder = await this.getOrCreateFolder(this.manager.window.PlacesUtils.bookmarks.toolbarGuid, "Zen");
-      const bookmarks = await this.getAllBookmarksInFolder(zenFolder);
-      
-      for (const bm of bookmarks) {
-        if (bm.url) {
-          this.bookmarkMap.set(bm.url, bm.guid);
-        }
-      }
-      
-      this.log(`Bookmark cache rebuilt: ${this.bookmarkMap.size} bookmarks`);
-    } catch (error) {
-      console.error("Error rebuilding bookmark cache:", error);
-    }
-  }
+  // ── Bookmark tree helpers ───────────────────────────────────────────────
 
   /**
-   * Get all bookmarks in a folder recursively
+   * Get all bookmarks in a folder recursively.
+   * Returns an array of { url, guid, title, folder } where `folder` is the
+   * path relative to the start folder (empty string for direct children).
    */
-  async getAllBookmarksInFolder(folderGuid) {
+  async getAllBookmarksInFolder(folderGuid, relativePath = "") {
     const bookmarks = [];
     try {
       const PlacesUtils = this.manager.window.PlacesUtils;
@@ -103,11 +106,11 @@ export class SyncManager {
 
       for (const child of tree.children) {
         if (child.uri) {
-          bookmarks.push({ url: child.uri, guid: child.guid, title: child.title || "" });
+          bookmarks.push({ url: child.uri, guid: child.guid, title: child.title || "", folder: relativePath });
         }
         if (child.uri == null && child.children !== undefined) {
-          // node has no URI and has children → it's a folder; recurse
-          const subBookmarks = await this.getAllBookmarksInFolder(child.guid);
+          const subPath = relativePath ? `${relativePath}/${child.title}` : child.title;
+          const subBookmarks = await this.getAllBookmarksInFolder(child.guid, subPath);
           bookmarks.push(...subBookmarks);
         }
       }
@@ -118,10 +121,16 @@ export class SyncManager {
   }
 
   /**
-   * Returns Map<spaceUuid|null, Map<url, guid>> for all bookmarks under Zen/<SpaceName>/.
-   * Space folders whose name doesn't match a current workspace get uuid = null (skipped in sync).
+   * Returns Map<spaceUuid|null, Array<{url, guid, title, folder}>> for all
+   * bookmarks under Zen/<SpaceName>/.
+   *
+   * `folder` is the subfolder path relative to the space folder (e.g. "Essentials",
+   * "My Projects/React"). Empty string means directly in the space root.
+   *
+   * Space folders whose name doesn't match a current workspace get uuid = null.
+   * Duplicate URLs are preserved — each bookmark is its own entry.
    */
-  async getBookmarkUrlsBySpace() {
+  async getBookmarkEntriesBySpace() {
     const PlacesUtils = this.manager.window.PlacesUtils;
     const gZenWorkspaces = this.manager.window.gZenWorkspaces;
     const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
@@ -134,21 +143,17 @@ export class SyncManager {
       }
     }
 
-    const result = new Map(); // spaceUuid|null → Map<url, guid>
+    const result = new Map(); // spaceUuid|null → Array<{url, guid, title, folder}>
     const zenTree = await PlacesUtils.promiseBookmarksTree(zenFolderGuid, { includeItemIds: false });
     if (!zenTree || !zenTree.children) return result;
 
     for (const spaceFolder of zenTree.children) {
-      // Use uri == null to detect folders: promiseBookmarksTree returns integer types
-      // that do NOT match the PlacesUtils.bookmarks.TYPE_FOLDER string constant.
       if (spaceFolder.uri != null) continue; // skip bookmarks / separators
       const spaceUuid = spaceByName.get(spaceFolder.title) ?? null;
-      if (!result.has(spaceUuid)) result.set(spaceUuid, new Map());
-      const urlMap = result.get(spaceUuid);
+      if (!result.has(spaceUuid)) result.set(spaceUuid, []);
+      const entries = result.get(spaceUuid);
       const bookmarks = await this.getAllBookmarksInFolder(spaceFolder.guid);
-      for (const bm of bookmarks) {
-        if (bm.url) urlMap.set(bm.url, bm.guid);
-      }
+      entries.push(...bookmarks);
     }
 
     return result;
@@ -171,7 +176,7 @@ export class SyncManager {
     return null;
   }
 
-  // (bookmark observer defined below in ── Bookmark observer ── section)
+  // ── Sync entry point ────────────────────────────────────────────────────
 
   /**
    * Perform sync based on preferences
@@ -188,12 +193,12 @@ export class SyncManager {
 
     const direction = this.manager.preferences.syncDirection;
     this.log(`Performing ${direction} sync...`);
-    
+
     this.syncInProgress = true;
-    
+
     try {
       let result;
-      
+
       switch (direction) {
         case "tabs-to-bookmarks":
           result = await this.syncToBookmarks();
@@ -207,11 +212,11 @@ export class SyncManager {
         default:
           throw new Error(`Unknown sync direction: ${direction}`);
       }
-      
+
       this.lastSyncTime = Date.now();
       this.manager.dispatchEvent("sync-completed", result);
       this.log("Sync completed:", result);
-      
+
       return result;
     } catch (error) {
       console.error("Sync error:", error);
@@ -222,9 +227,13 @@ export class SyncManager {
     }
   }
 
+  // ── syncToBookmarks ─────────────────────────────────────────────────────
+
   /**
    * Tabs-are-authority: push all open tabs to bookmarks, delete orphan bookmarks.
-   * After this call the Zen/ folder is an exact mirror of the current session.
+   * After this call the Zen/ folder is an exact structural mirror of the current
+   * session. Duplicate URLs are handled correctly — each tab instance gets its
+   * own bookmark.
    */
   async syncToBookmarks(options = {}) {
     const opts = {
@@ -250,11 +259,11 @@ export class SyncManager {
       bySpace: {}
     };
 
-    // Build tab groups by space, tracking URL sets for orphan detection
-    const tabsBySpace = new Map(); // spaceUuid → { space, tabs[], urlSet }
+    // Build tab groups by space
+    const tabsBySpace = new Map(); // spaceUuid → { space, tabs[] }
     if (gZenWorkspaces) {
       for (const ws of gZenWorkspaces.getWorkspaces()) {
-        tabsBySpace.set(ws.uuid, { space: ws, tabs: [], urlSet: new Set() });
+        tabsBySpace.set(ws.uuid, { space: ws, tabs: [] });
       }
     }
     for (const tabData of allTabs) {
@@ -266,17 +275,15 @@ export class SyncManager {
       if (!tabsBySpace.has(spaceId)) {
         tabsBySpace.set(spaceId, {
           space: { uuid: spaceId, name: tabData.workspace.name || "Other" },
-          tabs: [], urlSet: new Set()
+          tabs: []
         });
       }
-      const entry = tabsBySpace.get(spaceId);
-      entry.tabs.push(tabData);
-      entry.urlSet.add(tabData.url);
+      tabsBySpace.get(spaceId).tabs.push(tabData);
     }
 
-    const bmBySpace = await this.getBookmarkUrlsBySpace();
+    const bmBySpace = await this.getBookmarkEntriesBySpace();
 
-    for (const [spaceId, { space, tabs, urlSet }] of tabsBySpace) {
+    for (const [spaceId, { space, tabs }] of tabsBySpace) {
       const spaceFolderGuid = await this.getOrCreateFolder(zenFolderGuid, space.name);
       const spaceResult = { created: 0, updated: 0, deleted: 0 };
 
@@ -286,57 +293,73 @@ export class SyncManager {
         (t.type === "normal"    && opts.includeNormal)
       );
 
+      // Build a pool of existing bookmarks for this space that can be matched
+      // to tabs. Each bookmark can only be matched once (consumed from pool).
+      const bookmarkPool = [...(bmBySpace.get(spaceId) ?? [])];
+
       for (const tabData of syncTabs) {
         const folderGuid = await this.getBookmarkFolderForTab(spaceFolderGuid, tabData);
-        const created = await this.createOrUpdateBookmark(folderGuid, tabData.title, tabData.url);
-        created ? (result.bookmarksCreated++, spaceResult.created++) : (result.bookmarksUpdated++, spaceResult.updated++);
+        const folderName = this._subfolderNameForTab(tabData);
+
+        // Try to find an existing bookmark in the same folder with the same URL
+        const poolIdx = bookmarkPool.findIndex(
+          bm => bm.url === tabData.url && bm.folder === folderName
+        );
+
+        if (poolIdx !== -1) {
+          // Matched — consume from pool, update title if needed
+          const matched = bookmarkPool.splice(poolIdx, 1)[0];
+          const stored = await this.manager.window.PlacesUtils.bookmarks.search({ url: tabData.url });
+          const entry = stored.find(b => b.guid === matched.guid);
+          if (entry && entry.title !== tabData.title) {
+            await this.manager.window.PlacesUtils.bookmarks.update({ guid: matched.guid, title: tabData.title });
+          }
+          result.bookmarksUpdated++;
+          spaceResult.updated++;
+        } else {
+          // No match — create a new bookmark
+          await this.manager.window.PlacesUtils.bookmarks.insert({
+            parentGuid: folderGuid,
+            type: this.manager.window.PlacesUtils.bookmarks.TYPE_BOOKMARK,
+            title: tabData.title,
+            url: tabData.url
+          });
+          result.bookmarksCreated++;
+          spaceResult.created++;
+        }
       }
 
-      // Delete orphan bookmarks (bookmarked but no longer open)
-      const spaceBookmarks = bmBySpace.get(spaceId) ?? new Map();
-      for (const [url, guid] of spaceBookmarks) {
-        if (!urlSet.has(url)) {
-          await this.deleteBookmark(guid);
-          result.bookmarksDeleted++;
-          spaceResult.deleted++;
-        }
+      // Delete unmatched bookmarks (orphans: in bookmarks but no corresponding tab)
+      for (const orphan of bookmarkPool) {
+        await this.deleteBookmark(orphan.guid);
+        result.bookmarksDeleted++;
+        spaceResult.deleted++;
       }
 
       result.bySpace[space.name] = spaceResult;
     }
 
-    // Clean up orphan bookmarks from spaces with no open tabs at all.
-    // Skip null — these are space folders whose name no longer matches any workspace
-    // (renamed, deleted, etc.). Never delete what we can't positively identify.
-    for (const [spaceUuid, urlMap] of bmBySpace) {
+    // Clean up bookmarks from spaces with no open tabs at all.
+    for (const [spaceUuid, entries] of bmBySpace) {
       if (spaceUuid === null) continue;
       if (tabsBySpace.has(spaceUuid)) continue;
-      for (const [, guid] of urlMap) {
-        await this.deleteBookmark(guid);
+      for (const entry of entries) {
+        await this.deleteBookmark(entry.guid);
         result.bookmarksDeleted++;
       }
     }
 
-    await this.rebuildBookmarkCache();
     return result;
   }
 
+  // ── syncFromBookmarks ───────────────────────────────────────────────────
+
   /**
-   * Bookmarks-are-authority: open tabs for bookmarks not already open.
+   * Bookmarks-are-authority: open tabs for bookmarks not already matched to
+   * an open tab.
    *
-   * Walks the Zen/ bookmark folder directly.  If a space folder's name doesn't
-   * match any currently-existing Zen Space (e.g. fresh install), the space is
-   * created automatically via gZenWorkspaces.createAndSaveWorkspace.
-   *
-   * Tab type is inferred from the bookmark's containing sub-folder:
-   *   • Bookmark directly in the space root       → pinned (no Zen folder)
-   *   • Inside "Essentials/" sub-folder           → essential
-   *   • Inside "Temporary tabs/" sub-folder       → normal
-   *   • Inside any other named sub-folder         → normal (Zen folder, type lost)
-   *
-   * Before opening tabs for a space we call changeWorkspaceWithID() so Zen
-   * places the new tabs in the correct workspace.  The previously active
-   * workspace is restored afterwards.
+   * Duplicate URLs are handled correctly: if there are 3 bookmarks with the
+   * same URL and only 1 matching tab, 2 new tabs are opened.
    */
   async syncFromBookmarks() {
     this.log("Syncing bookmarks → tabs...");
@@ -346,9 +369,15 @@ export class SyncManager {
     const PlacesUtils    = this.manager.window.PlacesUtils;
     const gZenWorkspaces = this.manager.window.gZenWorkspaces;
 
-    const existingUrls = new Set(
-      (await this.manager.tabManager.getAllTabs()).map(t => t.url)
-    );
+    // Build a pool of open tabs per space: spaceUuid → Array<{url, type, folder, consumed}>
+    // Each tab can only be matched to one bookmark (consumed from pool).
+    const allTabs = await this.manager.tabManager.getAllTabs();
+    const tabPoolBySpace = new Map();
+    for (const tabData of allTabs) {
+      const spaceId = tabData.workspace.id;
+      if (!tabPoolBySpace.has(spaceId)) tabPoolBySpace.set(spaceId, []);
+      tabPoolBySpace.get(spaceId).push({ url: tabData.url, type: tabData.type, folder: this._subfolderNameForTab(tabData), consumed: false });
+    }
 
     // Build name → uuid lookup for all existing spaces
     const spaceByName = new Map();
@@ -390,6 +419,10 @@ export class SyncManager {
 
       if (!spaceUuid) continue;
 
+      // Ensure we have a tab pool for this space
+      if (!tabPoolBySpace.has(spaceUuid)) tabPoolBySpace.set(spaceUuid, []);
+      const spaceTabPool = tabPoolBySpace.get(spaceUuid);
+
       // Switch to this workspace BEFORE opening tabs so Zen assigns them here
       if (gZenWorkspaces?.changeWorkspaceWithID) {
         try { await gZenWorkspaces.changeWorkspaceWithID(spaceUuid); } catch (e) { /* non-fatal */ }
@@ -401,23 +434,25 @@ export class SyncManager {
         if (child.uri) {
           // Direct bookmark in the space root = pinned tab (had no Zen folder)
           result.bookmarksFound++;
-          await this._openRestoredTab(child.uri, spaceUuid, "pinned", existingUrls, result);
+          this._openOrMatchTab(child.uri, spaceUuid, "pinned", "", spaceTabPool, result);
         } else if (child.uri == null && child.children !== undefined) {
           if (child.title === "Essentials") {
             const bms = await this.getAllBookmarksInFolder(child.guid);
             result.bookmarksFound += bms.length;
             for (const bm of bms) {
-              await this._openRestoredTab(bm.url, spaceUuid, "essential", existingUrls, result);
+              const fullFolder = bm.folder ? `Essentials/${bm.folder}` : "Essentials";
+              this._openOrMatchTab(bm.url, spaceUuid, "essential", fullFolder, spaceTabPool, result);
             }
           } else if (child.title === "Temporary tabs") {
             const bms = await this.getAllBookmarksInFolder(child.guid);
             result.bookmarksFound += bms.length;
             for (const bm of bms) {
-              await this._openRestoredTab(bm.url, spaceUuid, "normal", existingUrls, result);
+              const fullFolder = bm.folder ? `Temporary tabs/${bm.folder}` : "Temporary tabs";
+              this._openOrMatchTab(bm.url, spaceUuid, "normal", fullFolder, spaceTabPool, result);
             }
           } else {
             // Named folder = pinned tab group with a Zen folder
-            await this._openRestoredFolder(child, spaceUuid, existingUrls, result);
+            await this._openRestoredFolder(child, spaceUuid, spaceTabPool, result, null, "");
           }
         }
       }
@@ -432,16 +467,30 @@ export class SyncManager {
   }
 
   /**
-   * Open one tab during a bookmark restore, applying the correct workspace
-   * assignment and tab-type attributes (essential / pinned / normal).
+   * Try to match a bookmark to an unconsumed tab in the pool. If no match,
+   * open a new tab.
+   *
+   * @param {string} url
+   * @param {string} spaceUuid
+   * @param {string} tabType - "essential" | "pinned" | "normal"
+   * @param {string} folder  - subfolder path relative to space root (e.g. "", "Essentials", "Projects")
+   * @param {Array}  spaceTabPool - mutable pool of {url, type, folder, consumed} entries
+   * @param {object} result - mutation target for counters
    */
-  async _openRestoredTab(url, spaceUuid, tabType, existingUrls, result) {
+  _openOrMatchTab(url, spaceUuid, tabType, folder, spaceTabPool, result) {
     if (!url) return;
-    if (existingUrls.has(url)) { result.tabsExisting++; return; }
+
+    // Try to consume an unconsumed tab with the same URL and same folder
+    const poolIdx = spaceTabPool.findIndex(e => !e.consumed && e.url === url && e.folder === folder);
+    if (poolIdx !== -1) {
+      spaceTabPool[poolIdx].consumed = true;
+      result.tabsExisting++;
+      return;
+    }
+
+    // No match — open a new tab
     const { gBrowser, gZenWorkspaces } = this.manager.window;
     try {
-      // For essential tabs, use the space's containerTabId as userContextId so
-      // Zen can scope them per-space when zen.workspaces.separate-essentials is on.
       const addTabOpts = { inBackground: true, triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() };
       if (tabType === "essential") {
         const containerTabId = gZenWorkspaces?.getWorkspaceFromId(spaceUuid)?.containerTabId ?? 0;
@@ -452,14 +501,14 @@ export class SyncManager {
       tab.setAttribute("zen-workspace-id", spaceUuid);
       if (tabType === "essential") {
         tab.setAttribute("zen-essential", "true");
-        // Keep zen-workspace-id: Zen scopes essentials per-space when
-        // zen.workspaces.separate-essentials is enabled.
         gBrowser.pinTab(tab);
       } else if (tabType === "pinned") {
         gBrowser.pinTab(tab);
       }
+      // Add the new tab to the pool as consumed so subsequent bookmarks with
+      // the same URL don't match against it.
+      spaceTabPool.push({ url, type: tabType, folder, consumed: true });
       result.tabsCreated++;
-      existingUrls.add(url);
     } catch (e) {
       console.error(`[ZenTabs] Error opening tab for ${url}:`, e);
       result.errors++;
@@ -468,26 +517,13 @@ export class SyncManager {
 
   /**
    * Restore a named bookmark subfolder as nested Zen folder(s).
-   *
-   * Strategy: create a Zen folder for every node, mirroring the bookmark
-   * hierarchy as nested Zen folders.  Each node with DIRECT bookmark children
-   * creates a folder containing the corresponding tabs.  Nodes with only
-   * sub-folders (no direct bookmarks) create an empty container folder so the
-   * nesting is preserved.  Sub-folders recurse with `parentFolder` set to the
-   * folder just created, so Zen renders them as nested groups.
-   *
-   * Example:  Work/ → url1, React/ → url2, url3
-   * produces: Zen folder "Work" [url1] containing subfolder "React" [url2, url3].
-   *
-   * @param {object}      folderChild  - Bookmark tree node (from promiseBookmarksTree)
-   * @param {string}      spaceUuid    - Target Zen Space UUID
-   * @param {Set<string>} existingUrls - URLs already open (dedup guard)
-   * @param {object}      result       - Mutation target for counters
-   * @param {object|null} parentFolder - Parent Zen folder to nest under (null = root)
    */
-  async _openRestoredFolder(folderChild, spaceUuid, existingUrls, result, parentFolder = null) {
+  async _openRestoredFolder(folderChild, spaceUuid, spaceTabPool, result, parentFolder = null, parentPath = "") {
     const { gBrowser } = this.manager.window;
     const gZenFolders = this.manager.window.gZenFolders;
+
+    // Build the full folder path relative to space root for pool matching
+    const currentPath = parentPath ? `${parentPath}/${folderChild.title}` : folderChild.title;
 
     const children = folderChild.children || [];
 
@@ -504,12 +540,18 @@ export class SyncManager {
       if (!gZenFolders) {
         // Fallback: restore as individual pinned tabs
         for (const url of directUrls) {
-          await this._openRestoredTab(url, spaceUuid, "pinned", existingUrls, result);
+          this._openOrMatchTab(url, spaceUuid, "pinned", currentPath, spaceTabPool, result);
         }
       } else {
         const createdTabs = [];
         for (const url of directUrls) {
-          if (existingUrls.has(url)) { result.tabsExisting++; continue; }
+          // Try to match to existing pinned tab in the same folder
+          const poolIdx = spaceTabPool.findIndex(e => !e.consumed && e.url === url && e.folder === currentPath);
+          if (poolIdx !== -1) {
+            spaceTabPool[poolIdx].consumed = true;
+            result.tabsExisting++;
+            continue;
+          }
           try {
             const tab = gBrowser.addTab(url, {
               inBackground: true,
@@ -518,7 +560,7 @@ export class SyncManager {
             if (!tab) { result.errors++; continue; }
             tab.setAttribute("zen-workspace-id", spaceUuid);
             createdTabs.push(tab);
-            existingUrls.add(url);
+            spaceTabPool.push({ url, type: "pinned", folder: currentPath, consumed: true });
           } catch (e) {
             console.error(`[ZenTabs] Error opening tab for ${url}:`, e);
             result.errors++;
@@ -541,7 +583,6 @@ export class SyncManager {
       }
     } else if (subFolders.length > 0 && gZenFolders) {
       // No direct bookmarks but has sub-folders: create an empty container
-      // folder so that sub-folder nesting is preserved in Zen.
       try {
         const opts = { label: folderChild.title, workspaceId: spaceUuid };
         if (parentFolder) opts.parentFolder = parentFolder;
@@ -554,21 +595,24 @@ export class SyncManager {
     // Recurse into each sub-folder, nesting under the folder we just created
     const nextParent = createdFolder || parentFolder;
     for (const sub of subFolders) {
-      await this._openRestoredFolder(sub, spaceUuid, existingUrls, result, nextParent);
+      await this._openRestoredFolder(sub, spaceUuid, spaceTabPool, result, nextParent, currentPath);
     }
   }
+
+  // ── syncBidirectional ───────────────────────────────────────────────────
 
   /**
    * True bidirectional sync using a manifest-based 3-way merge.
    *
-   * Sets:
-   *   M = manifest URLs for this space (what both sides agreed on last time)
-   *   T = current tab URLs for this space
-   *   B = current bookmark URLs for this space
+   * The manifest stores entries with bookmark GUIDs, so duplicate URLs are
+   * tracked correctly. Each entry is a single tab↔bookmark pairing.
    *
-   * After all operations the new manifest = T_final ∩ B_final, where:
-   *   T_final = (T - remote_deletions) ∪ remote_additions
-   *   B_final = (B - local_closures) ∪ local_additions
+   * Decision logic per space:
+   *   1. Tabs not covered by manifest (new local opens) → create bookmarks
+   *   2. Manifest entries whose tab is gone but bookmark exists → delete bookmark
+   *   3. Bookmarks not covered by manifest (new remote adds) → open tabs
+   *   4. Manifest entries whose bookmark is gone but tab exists → close tab (if pref)
+   *   5. New manifest = all surviving tab↔bookmark pairs
    */
   async syncBidirectional() {
     this.log("Bidirectional sync with manifest...");
@@ -579,19 +623,20 @@ export class SyncManager {
     const zenFolderGuid = await this.getOrCreateFolder(toolbarGuid, "Zen");
 
     const manifest   = this.loadManifest();
-    const bmBySpace  = await this.getBookmarkUrlsBySpace();
+    const bmBySpace  = await this.getBookmarkEntriesBySpace();
     const closeRemoved = this.manager.preferences.syncCloseRemovedTabs ?? false;
 
-    // Build tabs by space: spaceUuid → Map<url, tabData>
+    // Build tabs by space: spaceUuid → Array<tabData>
+    // Tabs are kept as arrays (not maps) to allow duplicate URLs.
     const tabsBySpace = new Map();
     if (gZenWorkspaces) {
-      for (const ws of gZenWorkspaces.getWorkspaces()) tabsBySpace.set(ws.uuid, new Map());
+      for (const ws of gZenWorkspaces.getWorkspaces()) tabsBySpace.set(ws.uuid, []);
     }
     for (const tabData of await this.manager.tabManager.getAllTabs()) {
       if (tabData.url.startsWith("about:") || tabData.url.startsWith("chrome://")) continue;
       const uuid = tabData.workspace.id;
-      if (!tabsBySpace.has(uuid)) tabsBySpace.set(uuid, new Map());
-      tabsBySpace.get(uuid).set(tabData.url, tabData);
+      if (!tabsBySpace.has(uuid)) tabsBySpace.set(uuid, []);
+      tabsBySpace.get(uuid).push(tabData);
     }
 
     const result = {
@@ -612,107 +657,205 @@ export class SyncManager {
     ]);
 
     for (const spaceUuid of allSpaceUuids) {
-      if (spaceUuid === null) continue; // skip unrecognized/renamed space folders
-      const M = manifest.get(spaceUuid)   ?? new Set();
-      const T = tabsBySpace.get(spaceUuid) ?? new Map();
-      const B = bmBySpace.get(spaceUuid)   ?? new Map();
+      if (spaceUuid === null) continue;
+      const M = manifest.get(spaceUuid) ?? [];  // Array<{url, guid, folder, type}>
+      const T = tabsBySpace.get(spaceUuid) ?? []; // Array<tabData>
+      const B = bmBySpace.get(spaceUuid) ?? [];   // Array<{url, guid, title, folder}>
 
       const workspace = gZenWorkspaces?.getWorkspaceFromId(spaceUuid);
       const spaceName = workspace?.name ?? spaceUuid;
       const spaceResult = { bookmarksCreated: 0, bookmarksDeleted: 0, tabsOpened: 0, tabsClosed: 0 };
 
-      // ── Tabs side ──────────────────────────────────────────────────────
+      // Index sets for fast lookup
+      const manifestGuids = new Set(M.map(e => e.guid));
+      const bookmarkGuids = new Set(B.map(e => e.guid));
 
-      for (const [url, tabData] of T) {
-        if (!M.has(url) && tabData.type !== "normal") {
-          // Opened locally (essential or pinned only) → push to bookmarks
-          const spaceFolderGuid = await this.getOrCreateFolder(zenFolderGuid, spaceName);
-          const subFolder = await this.getBookmarkFolderForTab(spaceFolderGuid, tabData);
-          const created = await this.createOrUpdateBookmark(subFolder, tabData.title, url);
-          if (created) { result.bookmarksCreated++; spaceResult.bookmarksCreated++; }
+      // ── Step 1: New local tabs → push to bookmarks ─────────────────
+      // Tabs not accounted for in the manifest are new local opens.
+      // We match manifest entries to tabs by URL + folder (consuming one
+      // manifest entry per tab) to find truly new tabs.
+      const unmatchedManifestKeys = M.map(e => ({ url: e.url, folder: e.folder })); // mutable copy
+      const newLocalTabs = [];
+      for (const tabData of T) {
+        const tabFolder = this._subfolderNameForTab(tabData);
+        const mIdx = unmatchedManifestKeys.findIndex(e => e.url === tabData.url && e.folder === tabFolder);
+        if (mIdx !== -1) {
+          unmatchedManifestKeys.splice(mIdx, 1); // consume
+        } else {
+          newLocalTabs.push(tabData);
         }
       }
 
-      for (const url of M) {
-        if (!T.has(url) && B.has(url)) {
-          // Closed locally → delete from bookmarks
-          await this.deleteBookmark(B.get(url));
-          result.bookmarksDeleted++;
-          spaceResult.bookmarksDeleted++;
+      for (const tabData of newLocalTabs) {
+        if (tabData.type === "normal") continue; // never push normal tabs
+        const spaceFolderGuid = await this.getOrCreateFolder(zenFolderGuid, spaceName);
+        const subFolder = await this.getBookmarkFolderForTab(spaceFolderGuid, tabData);
+        await this.manager.window.PlacesUtils.bookmarks.insert({
+          parentGuid: subFolder,
+          type: this.manager.window.PlacesUtils.bookmarks.TYPE_BOOKMARK,
+          title: tabData.title,
+          url: tabData.url
+        });
+        result.bookmarksCreated++;
+        spaceResult.bookmarksCreated++;
+      }
+
+      // ── Step 2: Closed locally → delete from bookmarks ─────────────
+      // Manifest entries whose URL+folder no longer has a tab but whose
+      // bookmark still exists.
+      const _tabKey = (url, folder) => `${url}\t${folder}`;
+
+      const tabKeyCounts = new Map();
+      for (const td of T) {
+        const key = _tabKey(td.url, this._subfolderNameForTab(td));
+        tabKeyCounts.set(key, (tabKeyCounts.get(key) ?? 0) + 1);
+      }
+
+      const manifestKeyCounts = new Map();
+      for (const me of M) {
+        const key = _tabKey(me.url, me.folder);
+        manifestKeyCounts.set(key, (manifestKeyCounts.get(key) ?? 0) + 1);
+      }
+
+      // For each URL+folder in manifest, if tab count < manifest count, some were closed
+      const closedLocally = []; // manifest entries to delete
+      const closedKeyBudget = new Map();
+      for (const [key, mCount] of manifestKeyCounts) {
+        const tCount = tabKeyCounts.get(key) ?? 0;
+        if (tCount < mCount) {
+          closedKeyBudget.set(key, mCount - tCount);
+        }
+      }
+      for (const me of M) {
+        const key = _tabKey(me.url, me.folder);
+        const budget = closedKeyBudget.get(key) ?? 0;
+        if (budget > 0 && bookmarkGuids.has(me.guid)) {
+          closedLocally.push(me);
+          closedKeyBudget.set(key, budget - 1);
         }
       }
 
-      // ── Bookmarks side ─────────────────────────────────────────────────
+      for (const me of closedLocally) {
+        await this.deleteBookmark(me.guid);
+        result.bookmarksDeleted++;
+        spaceResult.bookmarksDeleted++;
+      }
 
-      for (const [url] of B) {
-        if (!M.has(url) && !T.has(url)) {
-          // Added on another computer → open as tab
-          try {
-            const tab = gBrowser.addTab(url, {
-              inBackground: true,
-              triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
-            });
-            if (tab) tab.setAttribute("zen-workspace-id", spaceUuid);
-            result.tabsOpened++;
-            spaceResult.tabsOpened++;
-          } catch (e) {
-            console.error(`[ZenTabs] Failed to open tab for ${url}:`, e);
+      // ── Step 3: New remote bookmarks → open as tabs ────────────────
+      // Bookmarks not in manifest are new from another computer.
+      const unmatchedBookmarks = B.filter(bm => !manifestGuids.has(bm.guid));
+      // But some of these may already have matching open tabs. Match by URL + folder.
+      const unmatchedTabPool = T.map(td => ({ url: td.url, type: td.type, folder: this._subfolderNameForTab(td), consumed: false }));
+
+      // Also mark tabs that were consumed by manifest matching
+      // (rebuild: for each manifest entry with a matching tab, consume one tab)
+      const manifestTabConsume = M.map(e => ({ url: e.url, folder: e.folder })); // mutable copy
+      for (const poolEntry of unmatchedTabPool) {
+        const idx = manifestTabConsume.findIndex(e => e.url === poolEntry.url && e.folder === poolEntry.folder);
+        if (idx !== -1) {
+          poolEntry.consumed = true;
+          manifestTabConsume.splice(idx, 1);
+        }
+      }
+
+      for (const bm of unmatchedBookmarks) {
+        // Try to match to an unconsumed tab with same URL and same folder
+        const tabType = this._inferTabTypeFromFolder(bm.folder);
+        const poolIdx = unmatchedTabPool.findIndex(e => !e.consumed && e.url === bm.url && e.folder === bm.folder);
+        if (poolIdx !== -1) {
+          unmatchedTabPool[poolIdx].consumed = true;
+          continue; // already open
+        }
+        try {
+          const addTabOpts = {
+            inBackground: true,
+            triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
+          };
+          if (tabType === "essential") {
+            const containerTabId = gZenWorkspaces?.getWorkspaceFromId(spaceUuid)?.containerTabId ?? 0;
+            if (containerTabId) addTabOpts.userContextId = containerTabId;
           }
-        }
-      }
-
-      if (closeRemoved) {
-        for (const url of M) {
-          if (!B.has(url) && T.has(url)) {
-            // Deleted on another computer → close tab (never essential/pinned)
-            const tab = this.findTabByUrl(url);
-            if (tab && !tab.hasAttribute("zen-essential") && !tab.pinned) {
-              gBrowser.removeTab(tab);
-              result.tabsClosed++;
-              spaceResult.tabsClosed++;
+          const tab = gBrowser.addTab(bm.url, addTabOpts);
+          if (tab) {
+            tab.setAttribute("zen-workspace-id", spaceUuid);
+            if (tabType === "essential") {
+              tab.setAttribute("zen-essential", "true");
+              gBrowser.pinTab(tab);
+            } else if (tabType === "pinned") {
+              gBrowser.pinTab(tab);
             }
           }
+          unmatchedTabPool.push({ url: bm.url, type: tabType, folder: bm.folder, consumed: true });
+          result.tabsOpened++;
+          spaceResult.tabsOpened++;
+        } catch (e) {
+          console.error(`[ZenTabs] Failed to open tab for ${bm.url}:`, e);
         }
       }
 
-      // ── Compute new manifest for this space ────────────────────────────
-      // T_final = (T - remote_deletions) ∪ remote_additions
-      const T_final = new Set(T.keys());
+      // ── Step 4: Deleted on another computer → close tab ────────────
       if (closeRemoved) {
-        for (const url of M) {
-          if (!B.has(url) && T.has(url)) T_final.delete(url);
+        const deletedManifestEntries = M.filter(me => !bookmarkGuids.has(me.guid));
+        // Group by URL and count how many were deleted
+        const deletedUrlBudget = new Map();
+        for (const me of deletedManifestEntries) {
+          deletedUrlBudget.set(me.url, (deletedUrlBudget.get(me.url) ?? 0) + 1);
+        }
+        for (const [url, count] of deletedUrlBudget) {
+          let remaining = count;
+          // Find matching tabs to close (never close essential/pinned)
+          const tabs = this.manager.window.gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
+          for (const tab of [...tabs]) {
+            if (remaining <= 0) break;
+            if (tab.hasAttribute("zen-empty-tab")) continue;
+            if (tab.linkedBrowser?.currentURI?.spec !== url) continue;
+            if (tab.hasAttribute("zen-essential") || tab.pinned) continue;
+            if (tab.getAttribute("zen-workspace-id") !== spaceUuid) continue;
+            gBrowser.removeTab(tab);
+            result.tabsClosed++;
+            spaceResult.tabsClosed++;
+            remaining--;
+          }
         }
       }
-      for (const [url] of B) {
-        if (!M.has(url) && !T.has(url)) T_final.add(url);
+
+      // ── Step 5: Compute new manifest ───────────────────────────────
+      // Re-read bookmarks for this space after mutations
+      const updatedBm = await this.getBookmarkEntriesBySpace();
+      const updatedB = updatedBm.get(spaceUuid) ?? [];
+
+      // Re-read tabs after mutations
+      const updatedTabs = [];
+      for (const tabData of await this.manager.tabManager.getAllTabs()) {
+        if (tabData.url.startsWith("about:") || tabData.url.startsWith("chrome://")) continue;
+        if (tabData.workspace.id === spaceUuid) updatedTabs.push(tabData);
       }
 
-      // B_final = (B - local_closures) ∪ local_additions
-      const B_final = new Set(B.keys());
-      for (const url of M) {
-        if (!T.has(url) && B.has(url)) B_final.delete(url);
-      }
-      for (const [url, tabData] of T) {
-        // Only track essential + pinned in the manifest — never normal tabs
-        if (!M.has(url) && tabData.type !== "normal") B_final.add(url);
+      // Build new manifest: match each bookmark to a tab by URL + folder (consume both)
+      const newEntries = [];
+      const tabPool = updatedTabs.map(td => ({ ...td, folder: this._subfolderNameForTab(td), consumed: false }));
+
+      for (const bm of updatedB) {
+        const poolIdx = tabPool.findIndex(e => !e.consumed && e.url === bm.url && e.folder === bm.folder);
+        if (poolIdx !== -1) {
+          const td = tabPool[poolIdx];
+          newEntries.push({ url: bm.url, guid: bm.guid, folder: bm.folder, type: td.type });
+          tabPool[poolIdx].consumed = true;
+        }
       }
 
-      // New manifest = intersection (what both sides now have)
-      newManifest.set(spaceUuid, new Set([...T_final].filter(u => B_final.has(u))));
-
+      newManifest.set(spaceUuid, newEntries);
       result.bySpace[spaceName] = spaceResult;
     }
 
     this.saveManifest(newManifest);
-    await this.rebuildBookmarkCache();
     return result;
   }
+
   // ── PlacesUtils helpers ────────────────────────────────────────────────
 
   /**
    * Resolve the bookmark folder for a tab, mirroring its Zen folder hierarchy.
-   * Falls back to an "Essentials" subfolder for unfoldered essential tabs,
-   * and the space root for unfoldered pinned/normal tabs.
    */
   async getBookmarkFolderForTab(spaceFolderGuid, tabData) {
     const folderPath = tabData.folderPath;
@@ -733,6 +876,34 @@ export class SyncManager {
     return spaceFolderGuid; // pinned with no folder → space root
   }
 
+  /**
+   * Return the subfolder name string for a tab (used for matching bookmarks
+   * to tabs in syncToBookmarks).
+   */
+  _subfolderNameForTab(tabData) {
+    const folderPath = tabData.folderPath;
+    if (folderPath && folderPath.length > 0) return folderPath.join("/");
+    if (tabData.type === "essential") return "Essentials";
+    if (tabData.type === "normal") return "Temporary tabs";
+    return ""; // pinned with no folder → space root
+  }
+
+  /**
+   * Infer the tab type from a bookmark's folder path (relative to space root).
+   *   ""                → pinned (direct in space root)
+   *   "Essentials"      → essential
+   *   "Essentials/..."  → essential
+   *   "Temporary tabs"  → normal
+   *   "Temporary tabs/..." → normal
+   *   anything else     → pinned (named Zen folder)
+   */
+  _inferTabTypeFromFolder(folder) {
+    if (!folder || folder === "") return "pinned";
+    if (folder === "Essentials" || folder.startsWith("Essentials/")) return "essential";
+    if (folder === "Temporary tabs" || folder.startsWith("Temporary tabs/")) return "normal";
+    return "pinned"; // named folder = pinned tab group
+  }
+
   async getOrCreateFolder(parentId, title) {
     const existing = await this.manager.window.PlacesUtils.bookmarks.search({
       query: title,
@@ -749,29 +920,6 @@ export class SyncManager {
       title: title
     });
     return folder.guid;
-  }
-
-  /**
-   * Create or update bookmark.
-   * @returns {boolean} true if created, false if updated
-   */
-  async createOrUpdateBookmark(parentId, title, url) {
-    const existing = await this.manager.window.PlacesUtils.bookmarks.search({ url: url });
-    for (const bookmark of existing) {
-      if (bookmark.parentGuid === parentId) {
-        if (bookmark.title !== title) {
-          await this.manager.window.PlacesUtils.bookmarks.update({ guid: bookmark.guid, title });
-        }
-        return false; // Updated
-      }
-    }
-    await this.manager.window.PlacesUtils.bookmarks.insert({
-      parentGuid: parentId,
-      type: this.manager.window.PlacesUtils.bookmarks.TYPE_BOOKMARK,
-      title: title,
-      url: url
-    });
-    return true; // Created
   }
 
   // ── Bookmark observer ──────────────────────────────────────────────────
@@ -796,7 +944,7 @@ export class SyncManager {
   }
 
   onBookmarkAdded(url)  { this.log("Bookmark added:", url); }
-  onBookmarkRemoved(url) { this.log("Bookmark removed:", url); this.bookmarkMap.delete(url); }
+  onBookmarkRemoved(url) { this.log("Bookmark removed:", url); }
   onBookmarkChanged(guid) { this.log("Bookmark changed:", guid); }
 
   // ── Log / shutdown ─────────────────────────────────────────────────────
@@ -805,12 +953,10 @@ export class SyncManager {
     this.manager.log("[SyncManager]", ...args);
   }
 
-
   /**
    * Shutdown
    */
   async shutdown() {
-    this.bookmarkMap.clear();
     this.log("SyncManager shut down");
   }
 }

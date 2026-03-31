@@ -17,7 +17,9 @@
 - **Bookmarks → Tabs**: Open bookmarks as tabs automatically
 - **Bidirectional**: Keep tabs and bookmarks in perfect sync
 - **Preserves Structure**: Maintains folder hierarchy and organization
+- **Duplicate-safe**: Same URL in multiple folders/spaces syncs correctly (no dedup)
 - **Smart Sync**: Only syncs Essential and Pinned tabs (configurable)
+- **GUID-based manifest**: Tracks individual tab↔bookmark pairings, not just URLs
 
 ### 🧹 Automatic Cleanup
 - **Age-Based Cleanup**: Automatically close tabs older than X days
@@ -188,7 +190,7 @@ The mod is built with a clean separation of concerns:
 
 1. **zen.sys.mjs**: Initializes all managers per chrome window, handles lifecycle
 2. **TabManager**: Core tab operations and metadata extraction
-3. **SyncManager**: Manifest-based 3-way bookmark sync
+3. **SyncManager**: GUID-based manifest-driven 3-way bookmark sync (supports duplicate URLs)
 4. **CleanupManager**: Age-based cleanup, memory optimization, and idle tab unloading
 5. **UIManager**: User interface components
 6. **zen.api.mjs**: Public API (`ZenTabsAPI`) exposed on the chrome window

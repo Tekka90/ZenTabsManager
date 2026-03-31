@@ -65,7 +65,7 @@ ZenTabsManager/
 
 - **`ZenTabsManager`** (`zen.sys.mjs`): Central coordinator. Owns preferences, event bus (`EventTarget`), window reference, and manager instances. Background intervals live here.
 - **`TabManager`** (`content/TabManager.mjs`): Maintains an in-memory `Map<tab, metadata>` cache. Extracts type/state/workspace/folder/URL from each tab. Provides `getAllTabs()`, `getTabsFiltered(filters)`, `getStatistics()`.
-- **`SyncManager`** (`content/SyncManager.mjs`): Manifest-based 3-way bookmark sync. Maintains a `syncManifest` (stored in `zentabs.syncManifest` pref) that records the last-synced URL→GUID mapping per space. Uses `getBookmarkFolderForTab()` to mirror Zen folder hierarchy under `Zen/<SpaceName>/`. Uses `PlacesUtils.promiseBookmarksTree()`.
+- **`SyncManager`** (`content/SyncManager.mjs`): Manifest-based 3-way bookmark sync. Maintains a `syncManifest` (stored in `zentabs.syncManifest` pref) as an array of `{url, guid, folder, type}` entry objects per space, tracking individual tab↔bookmark pairings by bookmark GUID. Duplicate URLs are fully supported — URL is never used as a unique key. Uses pool-based matching to pair tabs with bookmarks 1:1. Uses `getBookmarkFolderForTab()` to mirror Zen folder hierarchy under `Zen/<SpaceName>/`. Uses `PlacesUtils.promiseBookmarksTree()`.
 - **`CleanupManager`** (`content/CleanupManager.mjs`): Age-based tab closure and memory optimization. Also supports **auto-unload of idle tabs** (`unloadStaleTabs()`) based on `autoUnloadDelay`. Memory reporting uses `ChromeUtils.requestProcInfo()` and `Services.sysinfo`. Respects `keepEssentialTabs` and `keepPinnedTabs` preferences.
 - **`UIManager`** (`content/UI.mjs`): Creates a XUL `toolbarbutton` in `#nav-bar` with a `menupopup`. Registers keyboard shortcuts via `document.addEventListener("keydown", ...)`.
 - **`ZenTabsAPI`** (`zen.api.mjs`): Thin facade over `window.ZenTabsManager`. All methods guard against uninitialized state.
@@ -134,9 +134,12 @@ const tabs = window.gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
 
 `SyncManager` does not do a simple push or pull. It performs a **3-way merge** using a persistent manifest:
 
-- **Manifest** (`zentabs.syncManifest` pref): A JSON map of `spaceUuid → { url → bookmarkGuid }` recording the last-synced state.
-- On each sync, the manifest is compared against the current bookmark tree (T = truth in bookmarks) and the live tabs (B = browser state) to decide what to add, remove, or leave alone.
-- `loadManifest()` / `saveManifest()` read and write this JSON string from/to prefs.
+- **Manifest** (`zentabs.syncManifest` pref): A JSON map of `spaceUuid → Array<{url, guid, folder, type}>`. Each entry represents a single tab↔bookmark pairing agreed on at the end of the last sync. `guid` is the Places bookmark GUID; duplicates of the same URL are separate entries.
+- **No URL-based dedup**: Duplicate URLs are valid everywhere — within the same space, folder, or subfolder. The sync operates on individual bookmark entries (identified by GUID) and tab instances, using pool-based matching to pair them 1:1.
+- On each sync, the manifest entries are compared against the current bookmark tree (B = bookmarks) and the live tabs (T = tab state) to decide what to add, remove, or leave alone. Count-based comparison handles duplicates correctly.
+- `loadManifest()` / `saveManifest()` read and write this JSON string from/to prefs. Legacy v1 manifests (URL sets) are auto-discarded on load, triggering a clean bootstrap sync.
+
+**Pool-based matching**: In all three sync modes (`syncToBookmarks`, `syncFromBookmarks`, `syncBidirectional`), tabs and bookmarks are matched by URL using consumable pools. Each match consumes one entry from each side. Unmatched items drive creation/deletion decisions. This allows N tabs with URL X to correctly produce N bookmarks with URL X.
 
 ### Bookmark Folder Structure
 
