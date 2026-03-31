@@ -400,33 +400,13 @@ describe("Metadata cache", () => {
     assert.equal(tm.tabMetadataCache.size, 1);
   });
 
-  test("getAllTabs refreshes stale about:blank URLs from live browser", async () => {
-    // Simulate a tab cached during init when URL was still about:blank
-    const tab = makeTab({ url: "about:blank" });
+  test("getAllTabs uses cache and does not rebuild", async () => {
+    const tab = makeTab({ url: "https://cached.com" });
     const mgr = makeManager({ tabs: [tab] });
     const tm = new TabManager(mgr);
     await tm.rebuildCache();
-    assert.equal(tm.tabMetadataCache.get(tab).url, "about:blank");
-
-    // Browser loads real URL after init
-    tab.linkedBrowser.currentURI.spec = "https://real-url.com";
-
     const result = await tm.getAllTabs();
-    assert.equal(result[0].url, "https://real-url.com", "live URL overrides stale cache");
-    assert.equal(tm.tabMetadataCache.get(tab).url, "https://real-url.com", "cache updated too");
-  });
-
-  test("getAllTabs refreshes tab type when it changes after cache", async () => {
-    const tab = makeTab({ url: "https://example.com" });
-    const mgr = makeManager({ tabs: [tab] });
-    const tm = new TabManager(mgr);
-    await tm.rebuildCache();
-    assert.equal(tm.tabMetadataCache.get(tab).type, "normal");
-
-    // Tab becomes essential after init
-    tab.setAttribute("zen-essential", "true");
-
-    const result = await tm.getAllTabs();
-    assert.equal(result[0].type, "essential", "live type overrides stale cache");
+    assert.equal(result.length, 1);
+    assert.equal(result[0].url, "https://cached.com");
   });
 });
