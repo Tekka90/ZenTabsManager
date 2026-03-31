@@ -154,9 +154,13 @@ export class CleanupManager {
     let unloaded = 0;
 
     for (const tabData of allTabs) {
-      if (tabData.state.includes("active"))    continue;
-      if (tabData.state.includes("discarded")) continue;
-      if (tabData.state.includes("loading"))  continue;
+      const tab = tabData.tab;
+      // Check live DOM state — cached metadata may be stale after a previous
+      // discardBrowser() call that didn't trigger a cache refresh.
+      if (tab.selected)                    continue;
+      if (tab.hasAttribute("discarded"))   continue;
+      if (tab.hasAttribute("busy"))        continue;
+      if (tab.hasAttribute("pending"))     continue;
       if (tabData.type === "essential" && this.manager.preferences.keepEssentialTabs) continue;
       if (tabData.type === "pinned"    && this.manager.preferences.keepPinnedTabs)    continue;
 

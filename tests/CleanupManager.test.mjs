@@ -311,6 +311,20 @@ describe("unloadStaleTabs", () => {
     await cm.unloadStaleTabs();
     assert.ok(eventFired);
   });
+
+  test("second run does not re-discard tabs already unloaded by first run", async () => {
+    const { cm, mgr } = makeUnloadCleanup([
+      { url: "https://idle.com", lastAccessed: Date.now() - 7200000 },
+    ], { autoUnloadDelay: 3600 });
+
+    await cm.unloadStaleTabs();
+    assert.equal(mgr.window.gBrowser._discarded.length, 1, "first run discards");
+
+    // Second run — the tab now has the "discarded" attribute set by
+    // discardBrowser(), so it should be skipped.
+    await cm.unloadStaleTabs();
+    assert.equal(mgr.window.gBrowser._discarded.length, 1, "second run should not re-discard");
+  });
 });
 
 // ── optimizeMemory ────────────────────────────────────────────────────────
