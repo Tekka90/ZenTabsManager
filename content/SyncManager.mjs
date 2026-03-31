@@ -274,6 +274,13 @@ export class SyncManager {
         continue;
       }
       const spaceId = tabData.workspace.id;
+      // Skip tabs that have no real workspace ("default" fallback from
+      // TabManager) when gZenWorkspaces is available — these are system
+      // tabs or tabs that lost their workspace attribute.
+      if (gZenWorkspaces && !tabsBySpace.has(spaceId)) {
+        result.skipped++;
+        continue;
+      }
       if (!tabsBySpace.has(spaceId)) {
         tabsBySpace.set(spaceId, {
           space: { uuid: spaceId, name: tabData.workspace.name || "Other" },
@@ -671,6 +678,8 @@ export class SyncManager {
     for (const tabData of await this.manager.tabManager.getAllTabs()) {
       if (tabData.url.startsWith("about:") || tabData.url.startsWith("chrome://")) continue;
       const uuid = tabData.workspace.id;
+      // Skip tabs with no real workspace when gZenWorkspaces is available
+      if (gZenWorkspaces && !tabsBySpace.has(uuid)) continue;
       if (!tabsBySpace.has(uuid)) tabsBySpace.set(uuid, []);
       tabsBySpace.get(uuid).push(tabData);
     }

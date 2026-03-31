@@ -399,6 +399,31 @@ describe("syncBidirectional — subsequent syncs (non-empty manifest)", () => {
 // ── syncToBookmarks (tabs-are-authority) ──────────────────────────────────
 
 describe("syncToBookmarks — tabs are authority", () => {
+  test("tabs without a real workspace are skipped (no 'default' folder)", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    // Tab WITH a workspace (pinned so it's included by default)
+    const goodTab = makeTab({ url: "https://good.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    // Tab WITHOUT a workspace attribute → TabManager returns workspace.id = "default"
+    const strayTab = makeTab({ url: "https://stray.com", pinned: true, attrs: {} });
+    const mgr = makeManager({ workspaces: [ws], tabs: [goodTab, strayTab] });
+
+    mgr.tabManager = { getAllTabs: async () => [
+      { url: "https://good.com", title: "Good", type: "pinned",
+        workspace: { id: ws.uuid, name: ws.name }, tab: goodTab },
+      { url: "https://stray.com", title: "Stray", type: "pinned",
+        workspace: { id: "default", name: "default" }, tab: strayTab },
+    ]};
+
+    const sync = new SyncManager(mgr);
+    const r = await sync.syncToBookmarks();
+
+    // The stray tab should be skipped, not synced into a "default" folder
+    assert.equal(r.skipped, 1, "stray tab should be skipped");
+    assert.equal(r.bookmarksCreated, 1, "only the good tab creates a bookmark");
+    const bms = await mgr.window.PlacesUtils.bookmarks.search({ url: "https://stray.com" });
+    assert.equal(bms.length, 0, "no bookmark for stray tab");
+  });
+
   test("orphan bookmarks are deleted", async () => {
     const ws = makeWorkspace("Personal", "uuid-personal");
     const mgr = makeManager({ workspaces: [ws], tabs: [] });
