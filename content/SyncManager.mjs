@@ -452,7 +452,8 @@ export class SyncManager {
       tab.setAttribute("zen-workspace-id", spaceUuid);
       if (tabType === "essential") {
         tab.setAttribute("zen-essential", "true");
-        tab.removeAttribute("zen-workspace-id"); // essentials are workspace-agnostic
+        // Keep zen-workspace-id: Zen scopes essentials per-space when
+        // zen.workspaces.separate-essentials is enabled.
         gBrowser.pinTab(tab);
       } else if (tabType === "pinned") {
         gBrowser.pinTab(tab);
@@ -466,74 +467,71 @@ export class SyncManager {
   }
 
   /**
-   * Restore a named bookmark subfolder as a Zen folder (pinned tab group).
-   * Uses gZenFolders.createFolder() which handles pinning and folder DOM creation.
+   * Restore a named bookmark subfolder as Zen folder(s).
+   *
+   * Strategy: create a Zen pinned-tab folder for every node that has DIRECT
+   * bookmark children, then recurse into any sub-folder children.  This
+   * preserves the full hierarchy: a bookmark tree like
+   *   Work/ → React/ → url1, url2          (no direct bookmarks in Work/)
+   *                  → Vue/  → url3
+   * produces two Zen folders: "React" with [url1, url2] and "Vue" with [url3],
+   * and NO flat "Work" folder — matching what the user sees in Zen.
    */
   async _openRestoredFolder(folderChild, spaceUuid, existingUrls, result) {
     const { gBrowser } = this.manager.window;
     const gZenFolders = this.manager.window.gZenFolders;
 
-    // Recursively collect ALL bookmark URIs from this folder and every nested
-    // subfolder.  Zen supports up to 5 levels of folder nesting; when we wrote
-    // these bookmarks via syncToBookmarks we preserved the tree, so the same
-    // tree must be traversed on restore.  We flatten all levels into a single
-    // Zen folder group (the outer folder's label) because the createFolder API
-    // does not support programmatic nesting during a batch restore.
-    const collectUrls = (node) => {
-      const urls = [];
-      for (const child of (node.children || [])) {
-        if (child.uri) {
-          urls.push(child.uri);
-        } else if (child.children) {
-          urls.push(...collectUrls(child));
+    const children = folderChild.children || [];
+
+    // Partition direct bookmark children from sub-folder children
+    const directUrls = children.filter(c => c.uri != null).map(c => c.uri);
+    const subFolders  = children.filter(c => c.uri == null && c.children !== undefined);
+
+    // Create a Zen folder for this node's direct bookmark children (if any)
+    if (directUrls.length > 0) {
+      result.bookmarksFound += directUrls.length;
+
+      if (!gZenFolders) {
+        // Fallback: restore as individual pinned tabs
+        for (const url of directUrls) {
+          await this._openRestoredTab(url, spaceUuid, "pinned", existingUrls, result);
+        }
+      } else {
+        const createdTabs = [];
+        for (const url of directUrls) {
+          if (existingUrls.has(url)) { result.tabsExisting++; continue; }
+          try {
+            const tab = gBrowser.addTab(url, {
+              inBackground: true,
+              triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
+            });
+            if (!tab) { result.errors++; continue; }
+            tab.setAttribute("zen-workspace-id", spaceUuid);
+            createdTabs.push(tab);
+            existingUrls.add(url);
+          } catch (e) {
+            console.error(`[ZenTabs] Error opening tab for ${url}:`, e);
+            result.errors++;
+          }
+        }
+        if (createdTabs.length > 0) {
+          try {
+            gZenFolders.createFolder(createdTabs, { label: folderChild.title, workspaceId: spaceUuid });
+            result.tabsCreated += createdTabs.length;
+          } catch (e) {
+            console.error(`[ZenTabs] Error creating Zen folder "${folderChild.title}":`, e);
+            for (const tab of createdTabs) {
+              try { gBrowser.pinTab(tab); } catch (_) { /* best-effort */ }
+            }
+            result.tabsCreated += createdTabs.length;
+          }
         }
       }
-      return urls;
-    };
-
-    const allUrls = collectUrls(folderChild);
-    result.bookmarksFound += allUrls.length;
-
-    if (!gZenFolders) {
-      // Fallback: restore as individual pinned tabs
-      for (const url of allUrls) {
-        await this._openRestoredTab(url, spaceUuid, "pinned", existingUrls, result);
-      }
-      return;
     }
 
-    const createdTabs = [];
-    for (const url of allUrls) {
-      if (existingUrls.has(url)) { result.tabsExisting++; continue; }
-      try {
-        const tab = gBrowser.addTab(url, {
-          inBackground: true,
-          triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
-        });
-        if (!tab) { result.errors++; continue; }
-        tab.setAttribute("zen-workspace-id", spaceUuid);
-        createdTabs.push(tab);
-        existingUrls.add(url);
-      } catch (e) {
-        console.error(`[ZenTabs] Error opening tab for ${url}:`, e);
-        result.errors++;
-      }
-    }
-
-    if (createdTabs.length > 0) {
-      try {
-        gZenFolders.createFolder(createdTabs, {
-          label: folderChild.title,
-          workspaceId: spaceUuid,
-        });
-        result.tabsCreated += createdTabs.length;
-      } catch (e) {
-        console.error(`[ZenTabs] Error creating Zen folder "${folderChild.title}":`, e);
-        for (const tab of createdTabs) {
-          try { gBrowser.pinTab(tab); } catch (_) { /* best-effort */ }
-        }
-        result.tabsCreated += createdTabs.length;
-      }
+    // Recurse into each sub-folder — each becomes its own Zen folder group
+    for (const sub of subFolders) {
+      await this._openRestoredFolder(sub, spaceUuid, existingUrls, result);
     }
   }
 
