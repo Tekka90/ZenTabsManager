@@ -195,6 +195,19 @@ export class TabManager {
       if (!metadata) {
         metadata = this.cacheTabMetadata(tab);
       }
+
+      // Always refresh URL and type from the live browser — the cache may hold
+      // stale "about:blank" from before session restore finished, or the tab
+      // type may have changed since the cache was built.
+      const liveUrl = tab.linkedBrowser?.currentURI?.spec;
+      if (liveUrl && liveUrl !== metadata.url) {
+        metadata.url = liveUrl;
+      }
+      const liveType = this.getTabType(tab);
+      if (liveType !== metadata.type) {
+        metadata.type = liveType;
+      }
+
       result.push(metadata);
     }
 
