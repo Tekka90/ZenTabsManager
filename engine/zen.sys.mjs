@@ -72,20 +72,22 @@ class ZenTabsManager {
   }
 
   async waitForBrowser() {
+    const win = this.window;
+
     // 1. Wait for gBrowser.tabs to exist
     await new Promise((resolve) => {
-      if (this.window.gBrowser?.tabs) {
+      if (win.gBrowser?.tabs) {
         resolve();
         return;
       }
-      const interval = setInterval(() => {
-        if (this.window.gBrowser?.tabs) {
-          clearInterval(interval);
+      const interval = win.setInterval(() => {
+        if (win.gBrowser?.tabs) {
+          win.clearInterval(interval);
           resolve();
         }
       }, 100);
-      setTimeout(() => {
-        clearInterval(interval);
+      win.setTimeout(() => {
+        win.clearInterval(interval);
         resolve();
       }, 10000);
     });
@@ -95,17 +97,17 @@ class ZenTabsManager {
     //    syncToBookmarks skips them all.
     await new Promise((resolve) => {
       // SessionStore sets __SSi on the window once restore is complete
-      if (this.window.__SSi !== undefined) {
+      if (win.__SSi !== undefined) {
         resolve();
         return;
       }
       const onRestore = () => {
-        this.window.removeEventListener("SSWindowStateReady", onRestore);
+        win.removeEventListener("SSWindowStateReady", onRestore);
         resolve();
       };
-      this.window.addEventListener("SSWindowStateReady", onRestore);
+      win.addEventListener("SSWindowStateReady", onRestore);
       // Safety timeout — don't block forever if the event already fired
-      setTimeout(resolve, 15000);
+      win.setTimeout(resolve, 15000);
     });
 
     console.log("[ZenTabs] Browser and session restore ready");
