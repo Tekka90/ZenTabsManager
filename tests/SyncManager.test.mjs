@@ -364,17 +364,31 @@ describe("syncBidirectional — subsequent syncs (non-empty manifest)", () => {
         }))
     };
 
-    await sync.syncBidirectional();
+    // First call with empty manifest + existing tabs + bookmarks → bootstraps.
+    // URLs don't match, so no pairs, but manifest gets initialized (empty
+    // arrays) to prevent re-bootstrapping.
+    const r1 = await sync.syncBidirectional();
+    assert.ok(r1.bootstrapped, "first call should bootstrap");
+    assert.equal(r1.tabsOpened, 0, "bootstrap should not open tabs");
 
-    // New manifest should include both URLs as v2 entries
-    const m = sync.loadManifest();
-    const entries = m.get(ws.uuid);
-    assert.ok(Array.isArray(entries), "manifest entries should be an array");
-    const urls = entries.map(e => e.url);
+    const m1 = sync.loadManifest();
+    assert.ok(m1.size > 0, "manifest should be initialized after bootstrap");
+    const entries1 = m1.get(ws.uuid);
+    assert.ok(Array.isArray(entries1), "manifest entries should be an array");
+    assert.equal(entries1.length, 0, "no matching pairs during bootstrap");
+
+    // Second call uses the populated manifest — NOW it will open tabs for
+    // unmatched bookmarks and push unmatched tabs to bookmarks.
+    const r2 = await sync.syncBidirectional();
+    assert.ok(!r2.bootstrapped, "second call should not bootstrap");
+
+    const m2 = sync.loadManifest();
+    const entries2 = m2.get(ws.uuid);
+    assert.ok(Array.isArray(entries2), "manifest entries should be an array after second sync");
+    const urls = entries2.map(e => e.url);
     assert.ok(urls.includes("https://new-local.com"), "local URL in manifest");
     assert.ok(urls.includes("https://remote.com"),    "remote URL in manifest");
-    // Each entry should have guid, folder, type
-    for (const entry of entries) {
+    for (const entry of entries2) {
       assert.ok(entry.guid, "entry should have a guid");
       assert.ok("folder" in entry, "entry should have a folder field");
       assert.ok(entry.type, "entry should have a type");

@@ -675,6 +675,52 @@ export class SyncManager {
       tabsBySpace.get(uuid).push(tabData);
     }
 
+    // ── Bootstrap: empty manifest with existing data ─────────────────
+    // When the manifest is completely empty but we already have both tabs
+    // and bookmarks, this is a first-run / format-migration scenario.
+    // Instead of treating all bookmarks as "new remote adds" (which would
+    // open hundreds of duplicate tabs), we bootstrap the manifest by
+    // matching existing tabs to existing bookmarks — no opens, no deletes.
+    const manifestIsEmpty = manifest.size === 0;
+    const hasTabs = [...tabsBySpace.values()].some(arr => arr.length > 0);
+    const hasBookmarks = [...bmBySpace.values()].some(arr => arr.length > 0);
+
+    if (manifestIsEmpty && hasTabs && hasBookmarks) {
+      this.log("Empty manifest with existing tabs & bookmarks — bootstrapping manifest (no changes)");
+      const bootstrapManifest = new Map();
+
+      for (const [spaceUuid, tabs] of tabsBySpace) {
+        const B = bmBySpace.get(spaceUuid) ?? [];
+        const entries = [];
+        const bmPool = B.map(bm => ({ ...bm, folder: this._normalizeFolder(bm.folder, spaceUuid), consumed: false }));
+
+        for (const tabData of tabs) {
+          const tabFolder = this._subfolderNameForTab(tabData);
+          const poolIdx = bmPool.findIndex(
+            e => !e.consumed && e.url === tabData.url && e.folder === tabFolder
+          );
+          if (poolIdx !== -1) {
+            const bm = bmPool[poolIdx];
+            entries.push({ url: bm.url, guid: bm.guid, folder: tabFolder, type: tabData.type });
+            bmPool[poolIdx].consumed = true;
+          }
+        }
+        // Always set entries (even empty) so manifest.size > 0 and we
+        // don't re-bootstrap on the next call.
+        bootstrapManifest.set(spaceUuid, entries);
+      }
+
+      this.saveManifest(bootstrapManifest);
+      return {
+        bookmarksCreated: 0,
+        bookmarksDeleted: 0,
+        tabsOpened: 0,
+        tabsClosed: 0,
+        bySpace: {},
+        bootstrapped: true
+      };
+    }
+
     const result = {
       bookmarksCreated: 0,
       bookmarksDeleted: 0,
@@ -684,6 +730,10 @@ export class SyncManager {
     };
 
     const newManifest = new Map();
+
+    // Remember current workspace so we can restore it after the loop
+    // (Steps 3 may switch workspaces to open tabs in the right space).
+    const previousWorkspace = gZenWorkspaces?.activeWorkspace ?? null;
 
     // Union of all space UUIDs seen across any source
     const allSpaceUuids = new Set([
@@ -792,13 +842,25 @@ export class SyncManager {
 
       // Also mark tabs that were consumed by manifest matching
       // (rebuild: for each manifest entry with a matching tab, consume one tab)
-      const manifestTabConsume = M.map(e => ({ url: e.url, folder: e.folder })); // mutable copy
+      const manifestTabConsume = M.map(e => ({ url: e.url, folder: this._normalizeFolder(e.folder, spaceUuid) }));
       for (const poolEntry of unmatchedTabPool) {
         const idx = manifestTabConsume.findIndex(e => e.url === poolEntry.url && e.folder === poolEntry.folder);
         if (idx !== -1) {
           poolEntry.consumed = true;
           manifestTabConsume.splice(idx, 1);
         }
+      }
+
+      // Switch to this workspace BEFORE opening tabs so Zen assigns them
+      // to the correct space (Zen uses the active workspace for new tabs).
+      let needsTabOpening = false;
+      for (const bm of unmatchedBookmarks) {
+        const bmFolder = this._normalizeFolder(bm.folder, spaceUuid);
+        const poolIdx = unmatchedTabPool.findIndex(e => !e.consumed && e.url === bm.url && e.folder === bmFolder);
+        if (poolIdx === -1) { needsTabOpening = true; break; }
+      }
+      if (needsTabOpening && gZenWorkspaces?.changeWorkspaceWithID) {
+        try { await gZenWorkspaces.changeWorkspaceWithID(spaceUuid); } catch (e) { /* non-fatal */ }
       }
 
       for (const bm of unmatchedBookmarks) {
@@ -891,6 +953,11 @@ export class SyncManager {
 
       newManifest.set(spaceUuid, newEntries);
       result.bySpace[spaceName] = spaceResult;
+    }
+
+    // Restore the workspace the user was in before the sync
+    if (gZenWorkspaces?.changeWorkspaceWithID && previousWorkspace) {
+      try { await gZenWorkspaces.changeWorkspaceWithID(previousWorkspace); } catch (e) { /* non-fatal */ }
     }
 
     this.saveManifest(newManifest);
