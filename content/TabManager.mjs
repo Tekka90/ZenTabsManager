@@ -92,6 +92,13 @@ export class TabManager {
    * the real URL that will be loaded when the tab is restored/activated.
    */
   _extractTabUrl(tab) {
+    // For pinned tabs, Zen stores the canonical "pinned URL" in _zenPinnedInitialState.
+    // The currently-loaded page may be an SSO redirect or auth wall — always prefer the
+    // stored pinned URL to avoid bookmarking ephemeral navigation targets.
+    if (tab.pinned && tab._zenPinnedInitialState?.entry?.url) {
+      return tab._zenPinnedInitialState.entry.url;
+    }
+
     const browser = tab.linkedBrowser;
     const uri = browser?.currentURI?.spec;
     if (uri && uri !== "about:blank") return uri;

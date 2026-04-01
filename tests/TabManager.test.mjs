@@ -447,4 +447,50 @@ describe("URL extraction (_extractTabUrl)", () => {
     const tm = new TabManager(mgr);
     assert.equal(tm._extractTabUrl(tab), "about:blank");
   });
+
+  // ── Pinned tab: canonical URL via _zenPinnedInitialState ─────────────────
+
+  test("pinned tab: returns _zenPinnedInitialState.entry.url over currentURI (SSO redirect scenario)", () => {
+    const tab = makeTab({
+      pinned: true,
+      url: "https://login.microsoft.com/redirect?to=teams",
+      _zenPinnedInitialState: { entry: { url: "https://teams.microsoft.com" }, image: null },
+    });
+    const mgr = makeManager({ tabs: [tab] });
+    const tm = new TabManager(mgr);
+    assert.equal(tm._extractTabUrl(tab), "https://teams.microsoft.com");
+  });
+
+  test("pinned tab: falls back to currentURI when _zenPinnedInitialState is absent", () => {
+    const tab = makeTab({ pinned: true, url: "https://teams.microsoft.com" });
+    const mgr = makeManager({ tabs: [tab] });
+    const tm = new TabManager(mgr);
+    assert.equal(tm._extractTabUrl(tab), "https://teams.microsoft.com");
+  });
+
+  test("pinned tab: falls back to currentURI when _zenPinnedInitialState has no entry", () => {
+    const tab = makeTab({
+      pinned: true,
+      url: "https://teams.microsoft.com",
+      _zenPinnedInitialState: { entry: null, image: null },
+    });
+    const mgr = makeManager({ tabs: [tab] });
+    const tm = new TabManager(mgr);
+    assert.equal(tm._extractTabUrl(tab), "https://teams.microsoft.com");
+  });
+
+  test("essential tab: also returns _zenPinnedInitialState.entry.url (essential tabs are pinned)", () => {
+    // In Zen, addToEssentials() calls gBrowser.pinTab(), so tab.pinned is always true
+    // for essential tabs. ZenWindowSync.on_TabPinned fires and sets _zenPinnedInitialState,
+    // so essential tabs benefit from the same canonical-URL protection as pinned tabs.
+    const tab = makeTab({
+      pinned: true,
+      attrs: { "zen-essential": "" },
+      url: "https://redirected.com",
+      _zenPinnedInitialState: { entry: { url: "https://original-essential.com" }, image: null },
+    });
+    const mgr = makeManager({ tabs: [tab] });
+    const tm = new TabManager(mgr);
+    assert.equal(tm._extractTabUrl(tab), "https://original-essential.com");
+  });
 });

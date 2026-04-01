@@ -2,7 +2,7 @@
  * SyncManager - Bi-directional bookmark synchronization
  *
  * Sync strategy: bookmark folder is the cross-computer shared channel (via Firefox Sync).
- * A local manifest (stored in Services.prefs) records what both sides last agreed on.
+ * A local manifest (stored in a profile JSON file) records what both sides last agreed on.
  * Comparing manifest vs. current tabs vs. current bookmarks drives all decisions.
  *
  * Decision table (per entry per Space):
@@ -16,22 +16,67 @@
  * bookmark entries (identified by GUID) and tab instances — not on URLs.
  *
  * On first install manifest = ∅, which is the correct bootstrap state.
+ *
+ * Multi-window safety
+ * -------------------
+ * Zen Browser can have multiple chrome windows open simultaneously. Each window
+ * gets its own ZenTabsManager + SyncManager instance. To prevent races:
+ *
+ *  _sharedManifest      – module-level Map shared by ALL instances in the same
+ *                         JS process. saveManifest() writes here synchronously so
+ *                         every window sees the update on its next loadManifest().
+ *
+ *  _globalSyncLock      – module-level lock that serialises syncs across windows.
+ *                         A window that sees the lock held simply skips its timer
+ *                         tick; it will retry on the next interval.
  */
 
+// ── Module-level shared state (all SyncManager instances in the same process) ──
 
+/** Single source of truth for the manifest, shared across all windows. */
+let _sharedManifest = new Map();
+
+/**
+ * Promise that resolves once the manifest has been loaded from disk/prefs.
+ * Set by the FIRST SyncManager that calls init(); subsequent inits await it.
+ */
+let _manifestInitPromise = null;
+
+/**
+ * Cross-window sync lock.  Holds the SyncManager instance currently running a
+ * sync, or null when idle.  A stale lock (> _SYNC_LOCK_TIMEOUT_MS old) is
+ * automatically overridden so a crashed window can never block syncs forever.
+ */
+let _globalSyncLock = null;
+let _globalSyncLockTime = 0;
+const _SYNC_LOCK_TIMEOUT_MS = 120_000; // 2 minutes
+
+/**
+ * Reset all module-level state.  ONLY for use in unit tests between test cases.
+ */
+export function _testResetSharedState() {
+  _sharedManifest = new Map();
+  _manifestInitPromise = null;
+  _globalSyncLock = null;
+  _globalSyncLockTime = 0;
+}
 
 export class SyncManager {
   constructor(manager) {
     this.manager = manager;
     this.lastSyncTime = 0;
     this.syncInProgress = false;
-    this._manifestData = new Map();
     this.log("SyncManager created");
   }
 
   async init() {
     this.log("SyncManager initializing...");
-    await this._initManifest();
+    // Only the first window to init loads from disk; subsequent windows await
+    // the same promise and then share _sharedManifest.
+    if (!_manifestInitPromise) {
+      _manifestInitPromise = this._initManifestImpl();
+    }
+    await _manifestInitPromise;
     this.setupBookmarkObserver();
     this.log("SyncManager initialized");
   }
@@ -39,19 +84,22 @@ export class SyncManager {
   // ── Manifest persistence ────────────────────────────────────────────────
 
   /**
-   * Return the current in-memory manifest.
-   * Populated by _initManifest() on startup; updated by saveManifest().
+   * Return the module-level shared manifest.
+   * All SyncManager instances in the same process share this reference.
    */
   loadManifest() {
-    return this._manifestData;
+    return _sharedManifest;
   }
 
   /**
-   * Update the in-memory manifest and asynchronously persist it to the
+   * Update the shared manifest and asynchronously persist it to the
    * profile-dir JSON file (fire-and-forget).
    *
-   * Normalises entries on the way in (strips legacy `guid` fields) so the
-   * in-memory cache and the on-disk file are always in v3 format.
+   * Writing to _sharedManifest is synchronous, so the updated manifest is
+   * immediately visible to ANY other SyncManager instance that calls
+   * loadManifest() — even before the async file write completes.
+   *
+   * Normalises entries on the way in (strips legacy `guid` fields).
    *
    * @param {Map<string, Array<{url, folder, type}>>} manifest
    */
@@ -60,14 +108,15 @@ export class SyncManager {
     for (const [spaceUuid, entries] of manifest) {
       normalized.set(spaceUuid, entries.map(({ url, folder = "", type = "normal" }) => ({ url, folder, type })));
     }
-    this._manifestData = normalized;
-    this._writeManifestFile(this._manifestData).catch(e =>
+    _sharedManifest = normalized;
+    this._writeManifestFile(_sharedManifest).catch(e =>
       console.error("[ZenTabs] Failed to write manifest file:", e)
     );
   }
 
   /**
-   * Initialise the in-memory manifest cache on startup.
+   * Load the manifest from disk (or migrate from the old pref).
+   * Called once at init time; subsequent windows share the same promise.
    *
    * Priority:
    *   1. Profile-dir JSON file (zentabs-manifest.json) — normal operation.
@@ -75,7 +124,7 @@ export class SyncManager {
    *      that caused "attempting to write N bytes to preference" warnings.
    *      After migrating, the pref is cleared.
    */
-  async _initManifest() {
+  async _initManifestImpl() {
     const IOUtils   = globalThis.IOUtils;
     const PathUtils = globalThis.PathUtils;
     if (IOUtils && PathUtils) {
@@ -83,7 +132,7 @@ export class SyncManager {
       try {
         if (await IOUtils.exists(filePath)) {
           const text = await IOUtils.readUTF8(filePath);
-          this._manifestData = this._parseManifestJSON(text);
+          _sharedManifest = this._parseManifestJSON(text);
           this.log("Loaded manifest from file");
           return;
         }
@@ -97,8 +146,8 @@ export class SyncManager {
     if (prefBranch.prefHasUserValue("syncManifest")) {
       try {
         const text = prefBranch.getStringPref("syncManifest", "{}");
-        this._manifestData = this._parseManifestJSON(text);
-        await this._writeManifestFile(this._manifestData);
+        _sharedManifest = this._parseManifestJSON(text);
+        await this._writeManifestFile(_sharedManifest);
         prefBranch.clearUserPref?.("syncManifest");
         this.log("Migrated syncManifest from prefs to file");
       } catch (e) {
@@ -237,6 +286,16 @@ export class SyncManager {
       this.log("Paused — skipping sync");
       return null;
     }
+
+    // Cross-window lock: if another window's SyncManager is already syncing,
+    // skip this tick (we'll retry on the next interval).
+    const now = Date.now();
+    if (_globalSyncLock !== null && _globalSyncLock !== this &&
+        (now - _globalSyncLockTime) < _SYNC_LOCK_TIMEOUT_MS) {
+      this.log("Global sync lock held by another window — skipping");
+      return null;
+    }
+
     if (this.syncInProgress) {
       this.log("Sync already in progress, skipping");
       return;
@@ -246,6 +305,8 @@ export class SyncManager {
     this.log(`Performing ${direction} sync...`);
 
     this.syncInProgress = true;
+    _globalSyncLock = this;
+    _globalSyncLockTime = Date.now();
 
     try {
       let result;
@@ -275,6 +336,7 @@ export class SyncManager {
       throw error;
     } finally {
       this.syncInProgress = false;
+      if (_globalSyncLock === this) _globalSyncLock = null;
     }
   }
 
@@ -612,6 +674,10 @@ export class SyncManager {
       const tab = gBrowser.addTab(url, addTabOpts);
       if (!tab) { result.errors++; return; }
       tab.setAttribute("zen-workspace-id", spaceUuid);
+      // Record the intent URL so rebuildManifest can match this tab to its
+      // bookmark even if the tab hasn't loaded yet (currentURI = about:blank)
+      // or has redirected to a different URL (e.g. an auth/error page).
+      tab.setAttribute("zentabs-pending-url", url);
       if (tabType === "essential") {
         tab.setAttribute("zen-essential", "true");
         gBrowser.pinTab(tab);
@@ -673,6 +739,8 @@ export class SyncManager {
             });
             if (!tab) { result.errors++; continue; }
             tab.setAttribute("zen-workspace-id", spaceUuid);
+            // Record the intent URL for rebuildManifest fallback matching.
+            tab.setAttribute("zentabs-pending-url", url);
             createdTabs.push(tab);
             spaceTabPool.push({ url, type: "pinned", folder: currentPath, consumed: true });
           } catch (e) {
@@ -1000,6 +1068,8 @@ export class SyncManager {
           const tab = gBrowser.addTab(bm.url, addTabOpts);
           if (tab) {
             tab.setAttribute("zen-workspace-id", spaceUuid);
+            // Record the intent URL for rebuildManifest fallback matching.
+            tab.setAttribute("zentabs-pending-url", bm.url);
             if (tabType === "essential") {
               tab.setAttribute("zen-essential", "true");
               gBrowser.pinTab(tab);
@@ -1113,7 +1183,17 @@ export class SyncManager {
       for (const ws of gZenWorkspaces.getWorkspaces()) tabsBySpace.set(ws.uuid, []);
     }
     for (const tabData of await this.manager.tabManager.getAllTabs()) {
-      if (tabData.url.startsWith("about:") || tabData.url.startsWith("chrome://")) continue;
+      // A tab that was opened by the sync manager may still show about:blank
+      // while loading. Honour it if it has a real intent URL (zentabs-pending-url).
+      const pendingUrl = tabData.tab?.getAttribute?.("zentabs-pending-url");
+      const effectiveUrl =
+        pendingUrl &&
+        !pendingUrl.startsWith("about:") &&
+        !pendingUrl.startsWith("chrome://") &&
+        tabData.url !== pendingUrl
+          ? pendingUrl
+          : tabData.url;
+      if (effectiveUrl.startsWith("about:") || effectiveUrl.startsWith("chrome://")) continue;
       const uuid = tabData.workspace.id;
       if (gZenWorkspaces && !tabsBySpace.has(uuid)) continue;
       if (!tabsBySpace.has(uuid)) tabsBySpace.set(uuid, []);
@@ -1130,12 +1210,28 @@ export class SyncManager {
         consumed: false,
       }));
       for (const tabData of tabs) {
+        // For tabs opened by the sync manager that haven't loaded yet (currentURI
+        // = about:blank) or have since redirected to a different URL (e.g. an auth
+        // wall), use the intent URL stored as "zentabs-pending-url" rather than the
+        // tab's current URL.  This prevents the "new remote add" oscillation where
+        // the tab never matches its bookmark and triggers a new open every cycle.
+        const pendingUrl = tabData.tab?.getAttribute?.("zentabs-pending-url");
+        const effectiveUrl =
+          pendingUrl &&
+          !pendingUrl.startsWith("about:") &&
+          !pendingUrl.startsWith("chrome://") &&
+          tabData.url !== pendingUrl
+            ? pendingUrl
+            : tabData.url;
+
+        if (effectiveUrl.startsWith("about:") || effectiveUrl.startsWith("chrome://")) continue;
+
         const tabFolder = this._subfolderNameForTab(tabData);
         const poolIdx = bmPool.findIndex(
-          e => !e.consumed && e.url === tabData.url && e.normFolder === tabFolder
+          e => !e.consumed && e.url === effectiveUrl && e.normFolder === tabFolder
         );
         if (poolIdx !== -1) {
-          entries.push({ url: tabData.url, folder: tabFolder, type: tabData.type });
+          entries.push({ url: effectiveUrl, folder: tabFolder, type: tabData.type });
           bmPool[poolIdx].consumed = true;
         }
       }

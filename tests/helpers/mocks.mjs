@@ -135,7 +135,7 @@ export function makePlacesUtils() {
 
 export function makeTab(overrides = {}) {
   const attrs = new Map(Object.entries(overrides.attrs ?? {}));
-  return {
+  const tab = {
     _tPos:        overrides._tPos ?? 0,
     pinned:       overrides.pinned       ?? false,
     hidden:       overrides.hidden       ?? false,
@@ -158,6 +158,10 @@ export function makeTab(overrides = {}) {
     removeAttribute(name) { attrs.delete(name); },
     _attrs: attrs,
   };
+  if (overrides._zenPinnedInitialState !== undefined) {
+    tab._zenPinnedInitialState = overrides._zenPinnedInitialState;
+  }
+  return tab;
 }
 
 export function makeGBrowser(tabs = []) {

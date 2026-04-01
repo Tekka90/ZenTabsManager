@@ -8,7 +8,10 @@
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { makeManager, makeTab } from "./helpers/mocks.mjs";
-import { SyncManager } from "../content/SyncManager.mjs";
+import { SyncManager, _testResetSharedState } from "../content/SyncManager.mjs";
+
+// Reset module-level shared state before every test so instances don't bleed.
+beforeEach(() => { _testResetSharedState(); });
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -83,7 +86,7 @@ describe("Manifest persistence", () => {
       JSON.stringify({ "uuid-A": [{ url: "https://a.com", folder: "", type: "pinned" }] })
     );
     const sync = new SyncManager(mgr);
-    await sync._initManifest();
+    await sync._initManifestImpl();
     const m = sync.loadManifest();
     assert.equal(m.size, 1);
     assert.equal(m.get("uuid-A")[0].url, "https://a.com");
@@ -95,7 +98,7 @@ describe("Manifest persistence", () => {
     });
     const mgr = makeManager({ prefStore: { "zentabs.": { syncManifest: prefData } } });
     const sync = new SyncManager(mgr);
-    await sync._initManifest();
+    await sync._initManifestImpl();
     const m = sync.loadManifest();
     assert.equal(m.size, 1);
     assert.equal(m.get("uuid-A")[0].url, "https://a.com");
@@ -110,7 +113,7 @@ describe("Manifest persistence", () => {
       prefStore: { "zentabs.": { syncManifest: JSON.stringify({ "uuid-old": ["https://old.com"] }) } }
     });
     const sync = new SyncManager(mgr);
-    await sync._initManifest();
+    await sync._initManifestImpl();
     const m = sync.loadManifest();
     assert.equal(m.size, 0, "legacy v1 format should be discarded");
   });
@@ -118,7 +121,7 @@ describe("Manifest persistence", () => {
   test("_initManifest survives corrupted pref gracefully", async () => {
     const mgr = makeManager({ prefStore: { "zentabs.": { syncManifest: "not-json{{" } } });
     const sync = new SyncManager(mgr);
-    await sync._initManifest();
+    await sync._initManifestImpl();
     const m = sync.loadManifest();
     assert.equal(m.size, 0);
   });
@@ -2501,5 +2504,167 @@ describe("syncFromBookmarks — lazy workspace switch (no unnecessary switches)"
 
     const allBms = await PlacesUtils.bookmarks.search({ type: "bookmark" });
     assert.equal(allBms.length, 3, "exactly 3 bookmarks — no duplicates");
+  });
+});
+
+// ── Multi-window: shared manifest + global sync lock ──────────────────────
+
+describe("Multi-window safety", () => {
+  test("two SyncManager instances share the same manifest via module-level state", () => {
+    const mgr1 = makeManager();
+    const mgr2 = makeManager();
+    const sync1 = new SyncManager(mgr1);
+    const sync2 = new SyncManager(mgr2);
+
+    sync1.saveManifest(new Map([["uuid-A", [{ url: "https://a.com", folder: "", type: "pinned" }]]]));
+
+    // sync2 must see sync1's write immediately
+    const m = sync2.loadManifest();
+    assert.equal(m.size, 1);
+    assert.equal(m.get("uuid-A")[0].url, "https://a.com");
+  });
+
+  test("performSync skips when another instance holds the global lock", async () => {
+    const ws = makeWorkspace("W", "uuid-w");
+    const mgr1 = makeManager({ workspaces: [ws], tabs: [] });
+    const mgr2 = makeManager({ workspaces: [ws], tabs: [] });
+
+    const sync1 = new SyncManager(mgr1);
+    const sync2 = new SyncManager(mgr2);
+    [sync1, sync2].forEach(s => { s.manager.tabManager = { getAllTabs: async () => [], rebuildCache: async () => {} }; });
+
+    // Manually hold the lock as if sync1 started
+    sync1.syncInProgress = true;
+    // Fire-and-forget: set global lock to sync1 by calling performSync in a way
+    // we can intercept — instead, use the internals directly.
+    // Simulate: sync1 holds the lock
+    const { _testResetSharedState: reset, ...rest } = await import("../content/SyncManager.mjs");
+    // We expose lock via performSync: start sync1, then try sync2
+    // Reset first so the lock is clear
+    _testResetSharedState();
+    sync1.syncInProgress = false;
+
+    // Let sync1 acquire the lock normally
+    let sync1Done = false;
+    let sync1Resolve;
+    const sync1Block = new Promise(r => { sync1Resolve = r; });
+
+    // Patch syncBidirectional on sync1 to block until we release it
+    sync1.syncBidirectional = async () => { await sync1Block; return { bookmarksCreated: 0, bookmarksDeleted: 0, tabsOpened: 0, tabsClosed: 0, bySpace: {} }; };
+    sync1.manager.preferences.syncDirection = "bidirectional";
+    sync2.manager.preferences.syncDirection = "bidirectional";
+    sync2.syncBidirectional = async () => { return { bookmarksCreated: 0, bookmarksDeleted: 0, tabsOpened: 0, tabsClosed: 0, bySpace: {} }; };
+
+    const p1 = sync1.performSync();         // sync1 acquires lock
+    const result2 = await sync2.performSync(); // sync2 should be blocked → returns null
+    assert.equal(result2, null, "sync2 skipped because sync1 holds the lock");
+
+    sync1Resolve(); // let sync1 finish
+    await p1;
+  });
+});
+
+// ── zentabs-pending-url: redirect / about:blank tolerance ─────────────────
+
+describe("zentabs-pending-url — redirect/about:blank tolerance in rebuildManifest", () => {
+  test("tab opened by sync that is still about:blank is matched to its bookmark via pending-url", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+    const sync = new SyncManager(mgr);
+
+    // Seed a bookmarked URL (pinned, space root)
+    await seedBookmark(PlacesUtils, ws.name, "https://internal.example.com");
+
+    // Simulate a tab that was opened for this bookmark but is still loading
+    const loadingTab = makeTab({ url: "about:blank" });
+    loadingTab.setAttribute("zen-workspace-id", ws.uuid);
+    loadingTab.setAttribute("zentabs-pending-url", "https://internal.example.com");
+    mgr.window.gBrowser.tabs.push(loadingTab);
+
+    mgr.tabManager = {
+      getAllTabs: async () => [{
+        url: "about:blank",  // still loading
+        title: "Loading…",
+        type: "pinned",
+        folderPath: null,
+        workspace: { id: ws.uuid, name: ws.name },
+        tab: loadingTab,
+      }],
+      rebuildCache: async () => {},
+    };
+
+    await sync.rebuildManifest();
+    const m = sync.loadManifest();
+    const entries = m.get(ws.uuid) ?? [];
+    assert.equal(entries.length, 1, "loading tab should be paired with bookmark via pending-url");
+    assert.equal(entries[0].url, "https://internal.example.com", "manifest stores bookmark URL, not about:blank");
+  });
+
+  test("tab that redirected to auth page is matched to its original bookmark", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+    const sync = new SyncManager(mgr);
+
+    const originalUrl = "https://intranet.company.com/dashboard";
+    const redirectUrl = "https://login.company.com/auth?redirect=...";
+
+    await seedBookmark(PlacesUtils, ws.name, originalUrl);
+
+    // Tab loaded to the redirect URL after the sync opened it
+    const redirectedTab = makeTab({ url: redirectUrl });
+    redirectedTab.setAttribute("zen-workspace-id", ws.uuid);
+    redirectedTab.setAttribute("zentabs-pending-url", originalUrl);
+    mgr.window.gBrowser.tabs.push(redirectedTab);
+
+    mgr.tabManager = {
+      getAllTabs: async () => [{
+        url: redirectUrl,
+        title: "Sign in",
+        type: "pinned",
+        folderPath: null,
+        workspace: { id: ws.uuid, name: ws.name },
+        tab: redirectedTab,
+      }],
+      rebuildCache: async () => {},
+    };
+
+    await sync.rebuildManifest();
+    const m = sync.loadManifest();
+    const entries = m.get(ws.uuid) ?? [];
+    assert.equal(entries.length, 1, "redirected tab matched to original bookmark");
+    assert.equal(entries[0].url, originalUrl, "manifest stores the bookmark (original) URL");
+  });
+
+  test("normal tab without pending-url is NOT matched to unrelated bookmarks", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+    const sync = new SyncManager(mgr);
+
+    await seedBookmark(PlacesUtils, ws.name, "https://other.com");
+
+    // Tab with no pending-url and a different URL
+    const tab = makeTab({ url: "https://unrelated.com" });
+    tab.setAttribute("zen-workspace-id", ws.uuid);
+    mgr.window.gBrowser.tabs.push(tab);
+
+    mgr.tabManager = {
+      getAllTabs: async () => [{
+        url: "https://unrelated.com",
+        title: "Unrelated",
+        type: "pinned",
+        folderPath: null,
+        workspace: { id: ws.uuid, name: ws.name },
+        tab,
+      }],
+      rebuildCache: async () => {},
+    };
+
+    await sync.rebuildManifest();
+    const m = sync.loadManifest();
+    const entries = m.get(ws.uuid) ?? [];
+    assert.equal(entries.length, 0, "no match — different URL, no pending-url");
   });
 });
