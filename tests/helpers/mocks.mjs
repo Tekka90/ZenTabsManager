@@ -301,6 +301,28 @@ export function makeGZenFolders() {
   };
 }
 
+// ── IOUtils / PathUtils (file I/O) ────────────────────────────────────────
+
+export function makeIOUtils(initialFiles = {}) {
+  const _store = new Map(Object.entries(initialFiles));
+  return {
+    async exists(path)             { return _store.has(path); },
+    async readUTF8(path)           {
+      if (!_store.has(path)) throw new Error(`File not found: ${path}`);
+      return _store.get(path);
+    },
+    async writeUTF8(path, content) { _store.set(path, content); },
+    _store,
+  };
+}
+
+export function makePathUtils(profileDir = "/tmp/test-profile") {
+  return {
+    profileDir,
+    join: (...parts) => parts.join("/"),
+  };
+}
+
 // ── Manager stub (central coordinator) ────────────────────────────────────
 
 /**
@@ -319,10 +341,13 @@ export function makeManager({
   const gZenWorkspaces = makeGZenWorkspaces(workspaces, tabs);
   const gZenFolders    = makeGZenFolders();
   const ContextualIdentityService = makeContextualIdentityService();
+  const ioUtils   = makeIOUtils();
+  const pathUtils = makePathUtils();
 
-  // Expose Services as a global for modules that reference it directly
-  // (SyncManager calls Services.prefs and Services.scriptSecurityManager)
-  globalThis.Services = Services;
+  // Expose globals for modules that reference them directly.
+  globalThis.Services  = Services;
+  globalThis.IOUtils   = ioUtils;
+  globalThis.PathUtils = pathUtils;
 
   const defaultPrefs = {
     enabled:              true,

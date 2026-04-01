@@ -43,7 +43,7 @@ async function seedBookmark(PlacesUtils, spaceName, url, title = url, subFolder 
 // ── Manifest persistence ────────────────────────────────────────────────────
 
 describe("Manifest persistence", () => {
-  test("loadManifest returns empty map when no prefs stored", () => {
+  test("loadManifest returns empty map before init", () => {
     const mgr = makeManager();
     const sync = new SyncManager(mgr);
     const m = sync.loadManifest();
@@ -69,24 +69,56 @@ describe("Manifest persistence", () => {
     assert.equal(loaded.size, 2);
     assert.equal(loaded.get("uuid-A").length, 2);
     assert.equal(loaded.get("uuid-A")[0].url, "https://a.com");
-    assert.ok(!("guid" in loaded.get("uuid-A")[0]), "guid is stripped on load (v2→v3 migration)");
+    assert.ok(!("guid" in loaded.get("uuid-A")[0]), "guid is stripped on save (normalisation)");
     assert.equal(loaded.get("uuid-A")[1].url, "https://b.com");
     assert.equal(loaded.get("uuid-B").length, 1);
     assert.equal(loaded.get("uuid-B")[0].url, "https://c.com");
   });
 
-  test("legacy v1 manifest (URL arrays) is treated as empty", () => {
+  test("_initManifest reads manifest from file when present", async () => {
+    const mgr = makeManager();
+    // Seed the in-memory file store that makeManager wired up as globalThis.IOUtils
+    globalThis.IOUtils._store.set(
+      "/tmp/test-profile/zentabs-manifest.json",
+      JSON.stringify({ "uuid-A": [{ url: "https://a.com", folder: "", type: "pinned" }] })
+    );
+    const sync = new SyncManager(mgr);
+    await sync._initManifest();
+    const m = sync.loadManifest();
+    assert.equal(m.size, 1);
+    assert.equal(m.get("uuid-A")[0].url, "https://a.com");
+  });
+
+  test("_initManifest migrates valid v2 pref to file and clears pref", async () => {
+    const prefData = JSON.stringify({
+      "uuid-A": [{ url: "https://a.com", folder: "", type: "pinned" }]
+    });
+    const mgr = makeManager({ prefStore: { "zentabs.": { syncManifest: prefData } } });
+    const sync = new SyncManager(mgr);
+    await sync._initManifest();
+    const m = sync.loadManifest();
+    assert.equal(m.size, 1);
+    assert.equal(m.get("uuid-A")[0].url, "https://a.com");
+    assert.ok(
+      globalThis.IOUtils._store.has("/tmp/test-profile/zentabs-manifest.json"),
+      "manifest should be written to file after migration"
+    );
+  });
+
+  test("_initManifest discards legacy v1 pref (URL arrays)", async () => {
     const mgr = makeManager({
       prefStore: { "zentabs.": { syncManifest: JSON.stringify({ "uuid-old": ["https://old.com"] }) } }
     });
     const sync = new SyncManager(mgr);
+    await sync._initManifest();
     const m = sync.loadManifest();
     assert.equal(m.size, 0, "legacy v1 format should be discarded");
   });
 
-  test("loadManifest survives corrupted prefs gracefully", () => {
+  test("_initManifest survives corrupted pref gracefully", async () => {
     const mgr = makeManager({ prefStore: { "zentabs.": { syncManifest: "not-json{{" } } });
     const sync = new SyncManager(mgr);
+    await sync._initManifest();
     const m = sync.loadManifest();
     assert.equal(m.size, 0);
   });

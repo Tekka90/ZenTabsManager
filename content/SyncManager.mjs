@@ -25,11 +25,13 @@ export class SyncManager {
     this.manager = manager;
     this.lastSyncTime = 0;
     this.syncInProgress = false;
+    this._manifestData = new Map();
     this.log("SyncManager created");
   }
 
   async init() {
     this.log("SyncManager initializing...");
+    await this._initManifest();
     this.setupBookmarkObserver();
     this.log("SyncManager initialized");
   }
@@ -37,62 +39,106 @@ export class SyncManager {
   // ── Manifest persistence ────────────────────────────────────────────────
 
   /**
-   * Load the sync manifest from prefs.
-   *
-   * Format v2: Map<spaceUuid, Array<{url, guid, folder, type}>>
-   *   - Each entry represents a single tab↔bookmark pairing that was agreed
-   *     on at the end of the last sync.
-   *   - `guid` is the Places bookmark GUID.
-   *   - `folder` is the subfolder path string (e.g. "Essentials", "My Projects")
-   *     or "" for space root.
-   *   - `type` is the tab type: "essential" | "pinned" | "normal".
-   *
-   * Legacy format (v1): Map<spaceUuid, string[]> (flat URL arrays / sets).
-   *   - Detected on load and silently migrated to v2 by discarding (treated as
-   *     empty manifest, which triggers a full bootstrap sync).
+   * Return the current in-memory manifest.
+   * Populated by _initManifest() on startup; updated by saveManifest().
    */
   loadManifest() {
-    try {
-      const prefBranch = Services.prefs.getBranch("zentabs.");
-      if (!prefBranch.prefHasUserValue("syncManifest")) return new Map();
-      const stored = JSON.parse(prefBranch.getStringPref("syncManifest", "{}"));
-      const manifest = new Map();
-      for (const [uuid, entries] of Object.entries(stored)) {
-        if (!Array.isArray(entries)) {
-          // Legacy v1 format (Set<url> serialised as string[]) — discard
-          continue;
+    return this._manifestData;
+  }
+
+  /**
+   * Update the in-memory manifest and asynchronously persist it to the
+   * profile-dir JSON file (fire-and-forget).
+   *
+   * Normalises entries on the way in (strips legacy `guid` fields) so the
+   * in-memory cache and the on-disk file are always in v3 format.
+   *
+   * @param {Map<string, Array<{url, folder, type}>>} manifest
+   */
+  saveManifest(manifest) {
+    const normalized = new Map();
+    for (const [spaceUuid, entries] of manifest) {
+      normalized.set(spaceUuid, entries.map(({ url, folder = "", type = "normal" }) => ({ url, folder, type })));
+    }
+    this._manifestData = normalized;
+    this._writeManifestFile(this._manifestData).catch(e =>
+      console.error("[ZenTabs] Failed to write manifest file:", e)
+    );
+  }
+
+  /**
+   * Initialise the in-memory manifest cache on startup.
+   *
+   * Priority:
+   *   1. Profile-dir JSON file (zentabs-manifest.json) — normal operation.
+   *   2. zentabs.syncManifest pref — one-time migration from the old storage
+   *      that caused "attempting to write N bytes to preference" warnings.
+   *      After migrating, the pref is cleared.
+   */
+  async _initManifest() {
+    const IOUtils   = globalThis.IOUtils;
+    const PathUtils = globalThis.PathUtils;
+    if (IOUtils && PathUtils) {
+      const filePath = PathUtils.join(PathUtils.profileDir, "zentabs-manifest.json");
+      try {
+        if (await IOUtils.exists(filePath)) {
+          const text = await IOUtils.readUTF8(filePath);
+          this._manifestData = this._parseManifestJSON(text);
+          this.log("Loaded manifest from file");
+          return;
         }
-        if (entries.length > 0 && typeof entries[0] === "string") {
-          // Legacy v1 — array of URL strings → discard
-          continue;
-        }
-        // Strip `guid` if present (v2→v3 migration). The manifest is now
-        // GUID-neutral, making it immune to Firefox Sync reassigning bookmark
-        // GUIDs — which previously caused all bookmarks to appear as "new
-        // remote adds" and triggered hundreds of spurious tab opens.
-        manifest.set(uuid, entries.map(({ url, folder = "", type = "normal" }) => ({ url, folder, type })));
+      } catch (e) {
+        console.error("[ZenTabs] Failed to read manifest file:", e);
       }
-      return manifest;
-    } catch (e) {
-      console.error("[ZenTabs] Failed to load sync manifest:", e);
-      return new Map();
+    }
+
+    // Migration: read from pref, write to file, clear pref.
+    const prefBranch = Services.prefs.getBranch("zentabs.");
+    if (prefBranch.prefHasUserValue("syncManifest")) {
+      try {
+        const text = prefBranch.getStringPref("syncManifest", "{}");
+        this._manifestData = this._parseManifestJSON(text);
+        await this._writeManifestFile(this._manifestData);
+        prefBranch.clearUserPref?.("syncManifest");
+        this.log("Migrated syncManifest from prefs to file");
+      } catch (e) {
+        console.error("[ZenTabs] Failed to migrate manifest from prefs:", e);
+      }
     }
   }
 
   /**
-   * Persist the sync manifest to prefs.
-   * @param {Map<string, Array<{url, guid, folder, type}>>} manifest
+   * Parse a raw JSON string into a v3 manifest Map.
+   * Discards legacy v1 (URL-array) entries and strips `guid` from v2 entries.
+   * @param {string} jsonStr
+   * @returns {Map<string, Array<{url, folder, type}>>}
    */
-  saveManifest(manifest) {
-    try {
-      const obj = {};
-      for (const [uuid, entries] of manifest) {
-        obj[uuid] = entries;
-      }
-      Services.prefs.getBranch("zentabs.").setStringPref("syncManifest", JSON.stringify(obj));
-    } catch (e) {
-      console.error("[ZenTabs] Failed to save sync manifest:", e);
+  _parseManifestJSON(jsonStr) {
+    const stored = JSON.parse(jsonStr);
+    const manifest = new Map();
+    for (const [uuid, entries] of Object.entries(stored)) {
+      if (!Array.isArray(entries)) continue;             // malformed
+      if (entries.length > 0 && typeof entries[0] === "string") continue; // legacy v1
+      manifest.set(uuid, entries.map(({ url, folder = "", type = "normal" }) => ({ url, folder, type })));
     }
+    return manifest;
+  }
+
+  /**
+   * Write the manifest to the profile-dir JSON file.
+   * No-op if IOUtils / PathUtils are unavailable (e.g. test environment).
+   * @param {Map<string, Array<{url, folder, type}>>} manifest
+   */
+  async _writeManifestFile(manifest) {
+    const IOUtils   = globalThis.IOUtils;
+    const PathUtils = globalThis.PathUtils;
+    if (!IOUtils || !PathUtils) return;
+    const obj = {};
+    for (const [uuid, entries] of manifest) obj[uuid] = entries;
+    await IOUtils.writeUTF8(
+      PathUtils.join(PathUtils.profileDir, "zentabs-manifest.json"),
+      JSON.stringify(obj)
+    );
   }
 
   // ── Bookmark tree helpers ───────────────────────────────────────────────
