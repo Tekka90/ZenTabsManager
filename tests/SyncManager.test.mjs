@@ -69,7 +69,7 @@ describe("Manifest persistence", () => {
     assert.equal(loaded.size, 2);
     assert.equal(loaded.get("uuid-A").length, 2);
     assert.equal(loaded.get("uuid-A")[0].url, "https://a.com");
-    assert.equal(loaded.get("uuid-A")[0].guid, "g-a");
+    assert.ok(!("guid" in loaded.get("uuid-A")[0]), "guid is stripped on load (v2→v3 migration)");
     assert.equal(loaded.get("uuid-A")[1].url, "https://b.com");
     assert.equal(loaded.get("uuid-B").length, 1);
     assert.equal(loaded.get("uuid-B")[0].url, "https://c.com");
@@ -389,7 +389,7 @@ describe("syncBidirectional — subsequent syncs (non-empty manifest)", () => {
     assert.ok(urls.includes("https://new-local.com"), "local URL in manifest");
     assert.ok(urls.includes("https://remote.com"),    "remote URL in manifest");
     for (const entry of entries2) {
-      assert.ok(entry.guid, "entry should have a guid");
+      assert.ok(!("guid" in entry), "entry must NOT have a guid (GUID-neutral v3 manifest)");
       assert.ok("folder" in entry, "entry should have a folder field");
       assert.ok(entry.type, "entry should have a type");
     }
@@ -1906,5 +1906,257 @@ describe("Folder normalization (_normalizeFolder)", () => {
 
     // Second run should not create any new bookmarks
     assert.equal(result2.bookmarksCreated, 0, "no duplicates on second sync");
+  });
+});
+
+// ── GUID rotation regression ───────────────────────────────────────────────
+//
+// Root cause that caused the user's "307 tabs opened" incident:
+//   Firefox Sync can replace ALL bookmark GUIDs when it reconciles a full
+//   sync (e.g. after being offline). The old manifest stored bookmark GUIDs
+//   as the identity key, so after rotation every bookmark looked like a
+//   "new remote add" → syncBidirectional opened a duplicate tab for every
+//   single bookmark.
+//
+// The fix: manifest is now GUID-neutral ({url, folder, type} only).
+// Detection uses count comparison per URL+folder key, not GUID membership.
+
+describe("syncBidirectional — GUID rotation regression", () => {
+  test("Firefox Sync replacing GUIDs does not trigger spurious tab opens", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    // Create the Zen/Work folder hierarchy manually so we can reuse the same
+    // parent folders when re-inserting after GUID rotation (simulating Firefox
+    // Sync deleting-and-recreating bookmarks with fresh GUIDs).
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenF   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid,  type: "folder", title: "Zen" });
+    const spaceF = await PlacesUtils.bookmarks.insert({ parentGuid: zenF.guid,    type: "folder", title: ws.name });
+    const tempF  = await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid,  type: "folder", title: "Temporary tabs" });
+
+    // Insert 3 bookmarks — record their OLD guids
+    const bm1 = await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://a.com", title: "A" });
+    const bm2 = await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://b.com", title: "B" });
+    const bm3 = await PlacesUtils.bookmarks.insert({ parentGuid: tempF.guid,  type: "bookmark", url: "https://c.com", title: "C" });
+
+    // Seed manifest with OLD guids (as it would look after a previous sync)
+    const sync = new SyncManager(mgr);
+    sync.saveManifest(new Map([[ws.uuid, [
+      { url: "https://a.com", guid: bm1.guid, folder: "",               type: "pinned" },
+      { url: "https://b.com", guid: bm2.guid, folder: "",               type: "pinned" },
+      { url: "https://c.com", guid: bm3.guid, folder: "Temporary tabs", type: "normal" },
+    ]]]));
+
+    // Open the corresponding tabs (steady state — nothing should change)
+    const tab1 = mgr.window.gBrowser.addTab("https://a.com", { triggeringPrincipal: {} });
+    tab1.setAttribute("zen-workspace-id", ws.uuid); tab1.pinned = true;
+    const tab2 = mgr.window.gBrowser.addTab("https://b.com", { triggeringPrincipal: {} });
+    tab2.setAttribute("zen-workspace-id", ws.uuid); tab2.pinned = true;
+    const tab3 = mgr.window.gBrowser.addTab("https://c.com", { triggeringPrincipal: {} });
+    tab3.setAttribute("zen-workspace-id", ws.uuid);
+
+    mgr.tabManager = { getAllTabs: async () => [
+      { url: "https://a.com", title: "A", type: "pinned",  workspace: { id: ws.uuid, name: ws.name }, tab: tab1 },
+      { url: "https://b.com", title: "B", type: "pinned",  workspace: { id: ws.uuid, name: ws.name }, tab: tab2 },
+      { url: "https://c.com", title: "C", type: "normal",  workspace: { id: ws.uuid, name: ws.name }, tab: tab3 },
+    ]};
+
+    // Simulate Firefox Sync GUID rotation: remove the existing bookmarks
+    // and insert fresh copies (same URLs, NEW guids) into the same folders.
+    await PlacesUtils.bookmarks.remove(bm1.guid);
+    await PlacesUtils.bookmarks.remove(bm2.guid);
+    await PlacesUtils.bookmarks.remove(bm3.guid);
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://a.com", title: "A" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://b.com", title: "B" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: tempF.guid,  type: "bookmark", url: "https://c.com", title: "C" });
+
+    const tabCountBefore = mgr.window.gBrowser.tabs.length;
+
+    const r = await sync.syncBidirectional();
+
+    // The CRITICAL assertions: GUID rotation must be transparent
+    assert.equal(r.tabsOpened,       0, "GUID rotation must NOT trigger spurious tab opens");
+    assert.equal(r.bookmarksCreated, 0, "no extra bookmarks after GUID rotation");
+    assert.equal(r.bookmarksDeleted, 0, "no bookmarks wrongly deleted");
+    assert.equal(mgr.window.gBrowser.tabs.length, tabCountBefore, "tab count unchanged");
+  });
+
+  test("GUID rotation combined with one genuinely new remote bookmark", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenF   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const spaceF = await PlacesUtils.bookmarks.insert({ parentGuid: zenF.guid,   type: "folder", title: ws.name });
+
+    // 2 existing bookmarks with known GUIDs
+    const bm1 = await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://existing-a.com", title: "A" });
+    const bm2 = await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://existing-b.com", title: "B" });
+
+    const sync = new SyncManager(mgr);
+    sync.saveManifest(new Map([[ws.uuid, [
+      { url: "https://existing-a.com", guid: bm1.guid, folder: "", type: "pinned" },
+      { url: "https://existing-b.com", guid: bm2.guid, folder: "", type: "pinned" },
+    ]]]));
+
+    // Open matching tabs
+    const tab1 = mgr.window.gBrowser.addTab("https://existing-a.com", { triggeringPrincipal: {} });
+    tab1.setAttribute("zen-workspace-id", ws.uuid); tab1.pinned = true;
+    const tab2 = mgr.window.gBrowser.addTab("https://existing-b.com", { triggeringPrincipal: {} });
+    tab2.setAttribute("zen-workspace-id", ws.uuid); tab2.pinned = true;
+
+    mgr.tabManager = { getAllTabs: async () => [
+      { url: "https://existing-a.com", title: "A", type: "pinned", workspace: { id: ws.uuid, name: ws.name }, tab: tab1 },
+      { url: "https://existing-b.com", title: "B", type: "pinned", workspace: { id: ws.uuid, name: ws.name }, tab: tab2 },
+    ]};
+
+    // Firefox Sync: rotate existing GUIDs AND add one truly new bookmark
+    await PlacesUtils.bookmarks.remove(bm1.guid);
+    await PlacesUtils.bookmarks.remove(bm2.guid);
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://existing-a.com", title: "A" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://existing-b.com", title: "B" });
+    // Genuinely new bookmark from the other computer
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://new-remote.com", title: "New" });
+
+    const r = await sync.syncBidirectional();
+
+    // Only the 1 truly new bookmark should open a new tab
+    assert.equal(r.tabsOpened, 1,       "only the truly new remote bookmark opens a tab");
+    assert.equal(r.bookmarksDeleted, 0, "no bookmarks wrongly deleted");
+    assert.equal(r.bookmarksCreated, 0, "no duplicate bookmarks created");
+
+    const newTabUrl = mgr.window.gBrowser.tabs.find(
+      t => t.linkedBrowser.currentURI.spec === "https://new-remote.com"
+    );
+    assert.ok(newTabUrl, "the new remote tab was opened");
+  });
+});
+
+// ── syncBidirectional — named folder restoration (Step 3) ─────────────────
+//
+// When syncBidirectional opens a tab for a "new remote" bookmark that lives
+// inside a named Zen folder, it must restore the Zen folder structure via
+// _openRestoredFolder — exactly like syncFromBookmarks does — instead of
+// silently falling back to a flat pinned tab.
+
+describe("syncBidirectional — named folder restoration (Step 3)", () => {
+  test("new remote bookmark in named folder → gZenFolders.createFolder called", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    // Seed a bookmark inside Zen/Work/Projects (named Zen folder)
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenF     = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid,  type: "folder", title: "Zen" });
+    const spaceF   = await PlacesUtils.bookmarks.insert({ parentGuid: zenF.guid,    type: "folder", title: ws.name });
+    const projF    = await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid,  type: "folder", title: "Projects" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: projF.guid, type: "bookmark", title: "GitHub", url: "https://github.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    const r = await sync.syncBidirectional();
+
+    assert.equal(r.tabsOpened, 1, "one tab opened");
+    // Tab must be inside a Zen folder, not a flat pinned tab
+    const folders = mgr.window.gZenFolders._createdFolders;
+    assert.equal(folders.length, 1, "one Zen folder created");
+    assert.equal(folders[0].label, "Projects");
+    assert.equal(folders[0].workspaceId, ws.uuid);
+    assert.equal(folders[0].tabs.length, 1);
+    assert.equal(folders[0].tabs[0].linkedBrowser.currentURI.spec, "https://github.com");
+  });
+
+  test("new remote bookmark in nested folder → two-level Zen folder restored", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenF     = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const spaceF   = await PlacesUtils.bookmarks.insert({ parentGuid: zenF.guid,   type: "folder", title: ws.name });
+    const workF    = await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "folder", title: "Work" });
+    const reactF   = await PlacesUtils.bookmarks.insert({ parentGuid: workF.guid,  type: "folder", title: "React" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: reactF.guid, type: "bookmark", title: "React", url: "https://react.com" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: reactF.guid, type: "bookmark", title: "Vue",   url: "https://vue.com" });
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    const r = await sync.syncBidirectional();
+
+    assert.equal(r.tabsOpened, 2, "two tabs opened");
+    const folders = mgr.window.gZenFolders._createdFolders;
+    assert.equal(folders.length, 2, "two Zen folders: Work + React");
+    const workFld  = folders.find(f => f.label === "Work");
+    const reactFld = folders.find(f => f.label === "React");
+    assert.ok(workFld,  "Work container folder created");
+    assert.ok(reactFld, "React folder created");
+    assert.equal(workFld.tabs.length, 0, "Work is an empty container");
+    assert.strictEqual(reactFld.parentFolder, workFld, "React nested inside Work");
+    assert.equal(reactFld.tabs.length, 2);
+  });
+
+  test("named folder tab already open → not duplicated, no folder created", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const PlacesUtils_mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = PlacesUtils_mgr.window.PlacesUtils;
+
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenF   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const spaceF = await PlacesUtils.bookmarks.insert({ parentGuid: zenF.guid,   type: "folder", title: ws.name });
+    const projF  = await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "folder", title: "Projects" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: projF.guid, type: "bookmark", title: "GitHub", url: "https://github.com" });
+
+    // Tab is already open in "Projects" folder
+    PlacesUtils_mgr.tabManager = { getAllTabs: async () => [{
+      url: "https://github.com", title: "GitHub", type: "pinned",
+      folderPath: ["Projects"],
+      workspace: { id: ws.uuid, name: ws.name },
+      tab: makeTab({ url: "https://github.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } }),
+    }]};
+
+    const sync = new SyncManager(PlacesUtils_mgr);
+    const r = await sync.syncBidirectional();
+
+    assert.equal(r.tabsOpened, 0, "no new tab opened — already exists");
+    const folders = PlacesUtils_mgr.window.gZenFolders._createdFolders;
+    assert.equal(folders.length, 0, "no folder created — tab was already matched");
+  });
+
+  test("_buildVirtualFolderTree: flat bookmarks produce correct tree", () => {
+    const mgr  = makeManager({ workspaces: [], tabs: [] });
+    const sync = new SyncManager(mgr);
+
+    const bms = [
+      { url: "https://a.com", folder: "Projects",       title: "A" },
+      { url: "https://b.com", folder: "Projects/React", title: "B" },
+      { url: "https://c.com", folder: "Projects/React", title: "C" },
+      { url: "https://d.com", folder: "Work",           title: "D" },
+    ];
+
+    const roots = sync._buildVirtualFolderTree(bms);
+
+    assert.equal(roots.length, 2, "two root folders: Projects and Work");
+    const projects = roots.find(n => n.title === "Projects");
+    const work     = roots.find(n => n.title === "Work");
+    assert.ok(projects, "Projects root exists");
+    assert.ok(work, "Work root exists");
+
+    // Projects has one direct bookmark and one sub-folder
+    const directBms = projects.children.filter(c => c.uri != null);
+    const subFolders = projects.children.filter(c => c.uri == null);
+    assert.equal(directBms.length, 1, "one direct bookmark in Projects");
+    assert.equal(directBms[0].uri, "https://a.com");
+    assert.equal(subFolders.length, 1, "one sub-folder in Projects");
+    assert.equal(subFolders[0].title, "React");
+    assert.equal(subFolders[0].children.length, 2, "React has two bookmarks");
+
+    // Work has one direct bookmark
+    const workDirect = work.children.filter(c => c.uri != null);
+    assert.equal(workDirect.length, 1);
+    assert.equal(workDirect[0].uri, "https://d.com");
   });
 });

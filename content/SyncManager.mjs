@@ -62,12 +62,15 @@ export class SyncManager {
           // Legacy v1 format (Set<url> serialised as string[]) — discard
           continue;
         }
-        // Validate that entries look like v2 objects (have `guid` field)
         if (entries.length > 0 && typeof entries[0] === "string") {
-          // Still legacy — array of URL strings
+          // Legacy v1 — array of URL strings → discard
           continue;
         }
-        manifest.set(uuid, entries);
+        // Strip `guid` if present (v2→v3 migration). The manifest is now
+        // GUID-neutral, making it immune to Firefox Sync reassigning bookmark
+        // GUIDs — which previously caused all bookmarks to appear as "new
+        // remote adds" and triggered hundreds of spurious tab opens.
+        manifest.set(uuid, entries.map(({ url, folder = "", type = "normal" }) => ({ url, folder, type })));
       }
       return manifest;
     } catch (e) {
@@ -647,8 +650,9 @@ export class SyncManager {
   /**
    * True bidirectional sync using a manifest-based 3-way merge.
    *
-   * The manifest stores entries with bookmark GUIDs, so duplicate URLs are
-   * tracked correctly. Each entry is a single tab↔bookmark pairing.
+   * The manifest stores entries as {url, folder, type} — no GUIDs — making it
+   * immune to Firefox Sync reassigning bookmark GUIDs. Duplicate URLs are
+   * tracked correctly by count per URL+folder key.
    *
    * Decision logic per space:
    *   1. Tabs not covered by manifest (new local opens) → create bookmarks
@@ -710,7 +714,7 @@ export class SyncManager {
           );
           if (poolIdx !== -1) {
             const bm = bmPool[poolIdx];
-            entries.push({ url: bm.url, guid: bm.guid, folder: tabFolder, type: tabData.type });
+            entries.push({ url: bm.url, folder: tabFolder, type: tabData.type });
             bmPool[poolIdx].consumed = true;
           }
         }
@@ -753,17 +757,13 @@ export class SyncManager {
 
     for (const spaceUuid of allSpaceUuids) {
       if (spaceUuid === null) continue;
-      const M = manifest.get(spaceUuid) ?? [];  // Array<{url, guid, folder, type}>
+      const M = manifest.get(spaceUuid) ?? [];  // Array<{url, folder, type}>
       const T = tabsBySpace.get(spaceUuid) ?? []; // Array<tabData>
       const B = bmBySpace.get(spaceUuid) ?? [];   // Array<{url, guid, title, folder}>
 
       const workspace = gZenWorkspaces?.getWorkspaceFromId(spaceUuid);
       const spaceName = workspace?.name ?? spaceUuid;
       const spaceResult = { bookmarksCreated: 0, bookmarksDeleted: 0, tabsOpened: 0, tabsClosed: 0 };
-
-      // Index sets for fast lookup
-      const manifestGuids = new Set(M.map(e => e.guid));
-      const bookmarkGuids = new Set(B.map(e => e.guid));
 
       // ── Step 1: New local tabs → push to bookmarks ─────────────────
       // Tabs not accounted for in the manifest are new local opens.
@@ -814,7 +814,7 @@ export class SyncManager {
       }
 
       // For each URL+folder in manifest, if tab count < manifest count, some were closed
-      const closedLocally = []; // manifest entries to delete
+      const closedLocally = []; // guids of bookmarks to delete
       const closedKeyBudget = new Map();
       for (const [key, mCount] of manifestKeyCounts) {
         const tCount = tabKeyCounts.get(key) ?? 0;
@@ -822,17 +822,27 @@ export class SyncManager {
           closedKeyBudget.set(key, mCount - tCount);
         }
       }
-      for (const me of M) {
-        const key = _tabKey(me.url, me.folder);
-        const budget = closedKeyBudget.get(key) ?? 0;
-        if (budget > 0 && bookmarkGuids.has(me.guid)) {
-          closedLocally.push(me);
-          closedKeyBudget.set(key, budget - 1);
+      // Pool-based deletion: find actual bookmarks in B by URL+folder key.
+      // No manifest GUIDs needed — correct even after Firefox Sync replaces them.
+      const bmStep2Pool = B.map(bm => ({
+        guid: bm.guid, url: bm.url,
+        normFolder: this._normalizeFolder(bm.folder, spaceUuid), consumed: false
+      }));
+      for (const [key, budget] of closedKeyBudget) {
+        let remaining = budget;
+        for (const entry of bmStep2Pool) {
+          if (remaining <= 0) break;
+          if (entry.consumed) continue;
+          if (_tabKey(entry.url, entry.normFolder) === key) {
+            closedLocally.push(entry.guid);
+            entry.consumed = true;
+            remaining--;
+          }
         }
       }
 
-      for (const me of closedLocally) {
-        await this.deleteBookmark(me.guid);
+      for (const guid of closedLocally) {
+        await this.deleteBookmark(guid);
         result.bookmarksDeleted++;
         spaceResult.bookmarksDeleted++;
       }
@@ -844,8 +854,21 @@ export class SyncManager {
       }
 
       // ── Step 3: New remote bookmarks → open as tabs ────────────────
-      // Bookmarks not in manifest are new from another computer.
-      const unmatchedBookmarks = B.filter(bm => !manifestGuids.has(bm.guid));
+      // Count-based detection: bookmarks exceeding manifest count per URL+folder
+      // key are "new remote adds". GUID-neutral — immune to Firefox Sync replacing
+      // GUIDs on existing bookmarks, which previously caused mass spurious tab opens.
+      const bmKeyMap = new Map(); // normalized-key → Array<bm>
+      for (const bm of B) {
+        const k = _tabKey(bm.url, this._normalizeFolder(bm.folder, spaceUuid));
+        if (!bmKeyMap.has(k)) bmKeyMap.set(k, []);
+        bmKeyMap.get(k).push(bm);
+      }
+      const unmatchedBookmarks = [];
+      for (const [key, bms] of bmKeyMap) {
+        const mCount = manifestKeyCounts.get(key) ?? 0;
+        const extra = Math.max(0, bms.length - mCount);
+        for (let i = 0; i < extra; i++) unmatchedBookmarks.push(bms[i]);
+      }
       // But some of these may already have matching open tabs. Match by URL + folder.
       const unmatchedTabPool = T.map(td => ({ url: td.url, type: td.type, folder: this._subfolderNameForTab(td), consumed: false }));
 
@@ -872,15 +895,29 @@ export class SyncManager {
         try { await gZenWorkspaces.changeWorkspaceWithID(spaceUuid); } catch (e) { /* non-fatal */ }
       }
 
+      // Partition unmatched bookmarks: simple cases (essential, normal, space-root
+      // pinned) are opened inline; named Zen folder bookmarks are grouped into a
+      // virtual tree and restored via _openRestoredFolder — the same path used by
+      // syncFromBookmarks — so tabs land inside proper Zen folders instead of as
+      // flat pinned tabs.
+      const namedFolderUnmatched = [];
       for (const bm of unmatchedBookmarks) {
         // Try to match to an unconsumed tab with same URL and same folder
         const bmFolder = this._normalizeFolder(bm.folder, spaceUuid);
-        const tabType = this._inferTabTypeFromFolder(bmFolder);
-        const poolIdx = unmatchedTabPool.findIndex(e => !e.consumed && e.url === bm.url && e.folder === bmFolder);
+        const tabType  = this._inferTabTypeFromFolder(bmFolder);
+        const poolIdx  = unmatchedTabPool.findIndex(e => !e.consumed && e.url === bm.url && e.folder === bmFolder);
         if (poolIdx !== -1) {
           unmatchedTabPool[poolIdx].consumed = true;
           continue; // already open
         }
+
+        if (tabType === "pinned" && bmFolder !== "") {
+          // Named Zen folder — defer to folder-restoration logic below
+          namedFolderUnmatched.push({ ...bm, folder: bmFolder });
+          continue;
+        }
+
+        // Simple open: essential, normal, or space-root pinned (bmFolder === "")
         try {
           const addTabOpts = {
             inBackground: true,
@@ -900,7 +937,7 @@ export class SyncManager {
               gBrowser.pinTab(tab);
             }
           }
-          unmatchedTabPool.push({ url: bm.url, type: tabType, folder: bm.folder, consumed: true });
+          unmatchedTabPool.push({ url: bm.url, type: tabType, folder: bmFolder, consumed: true });
           result.tabsOpened++;
           spaceResult.tabsOpened++;
         } catch (e) {
@@ -908,15 +945,31 @@ export class SyncManager {
         }
       }
 
+      // Restore named Zen folder bookmarks as proper Zen folder groups.
+      if (namedFolderUnmatched.length > 0) {
+        const virtualTree = this._buildVirtualFolderTree(namedFolderUnmatched);
+        // shimResult bridges _openRestoredFolder's counter names to syncBidirectional's.
+        const shimResult = { bookmarksFound: 0, tabsCreated: 0, tabsExisting: 0, errors: 0 };
+        for (const rootNode of virtualTree) {
+          await this._openRestoredFolder(rootNode, spaceUuid, unmatchedTabPool, shimResult, null, "");
+        }
+        result.tabsOpened      += shimResult.tabsCreated;
+        spaceResult.tabsOpened += shimResult.tabsCreated;
+      }
+
       // ── Step 4: Deleted on another computer → close tab ────────────
       if (closeRemoved) {
-        const deletedManifestEntries = M.filter(me => !bookmarkGuids.has(me.guid));
-        // Group by URL and count how many were deleted
-        const deletedUrlBudget = new Map();
-        for (const me of deletedManifestEntries) {
-          deletedUrlBudget.set(me.url, (deletedUrlBudget.get(me.url) ?? 0) + 1);
+        // Count-based: for each URL+folder key in manifest, if bookmark count
+        // is lower than manifest count, some were deleted remotely → close tabs.
+        const deletedBudgetByUrl = new Map();
+        for (const [key, mCount] of manifestKeyCounts) {
+          const bmCount = bmKeyMap.get(key)?.length ?? 0;
+          if (bmCount < mCount) {
+            const url = key.slice(0, key.indexOf("\t"));
+            deletedBudgetByUrl.set(url, (deletedBudgetByUrl.get(url) ?? 0) + (mCount - bmCount));
+          }
         }
-        for (const [url, count] of deletedUrlBudget) {
+        for (const [url, count] of deletedBudgetByUrl) {
           let remaining = count;
           // Find matching tabs to close (never close essential/pinned)
           const tabs = this.manager.window.gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
@@ -955,7 +1008,7 @@ export class SyncManager {
         const poolIdx = tabPool.findIndex(e => !e.consumed && e.url === bm.url && e.folder === bmFolder);
         if (poolIdx !== -1) {
           const td = tabPool[poolIdx];
-          newEntries.push({ url: bm.url, guid: bm.guid, folder: bmFolder, type: td.type });
+          newEntries.push({ url: bm.url, folder: bmFolder, type: td.type });
           tabPool[poolIdx].consumed = true;
         }
       }
@@ -1024,6 +1077,45 @@ export class SyncManager {
     if (this._isEssentialsFolder(topLevel)) return "essential";
     if (topLevel === "Temporary tabs") return "normal";
     return "pinned"; // named folder = pinned tab group
+  }
+
+  /**
+   * Build a virtual bookmark folder tree from a flat array of bookmark objects
+   * whose `folder` field is a non-empty path string relative to the space root
+   * (e.g. "Projects" or "Projects/React").
+   *
+   * Returns root-level virtual folder nodes in the shape expected by
+   * _openRestoredFolder:
+   *   { title, uri: null, children: Array<{ uri, title } | folder node> }
+   *
+   * This allows syncBidirectional Step 3 to restore named Zen folder bookmarks
+   * using the same path as syncFromBookmarks, instead of silently falling back
+   * to flat pinned tabs.
+   */
+  _buildVirtualFolderTree(bookmarks) {
+    const roots = [];
+    const nodesByPath = new Map(); // pathKey → folder node
+
+    const getOrCreateFolder = (pathParts) => {
+      const key = pathParts.join("/");
+      if (nodesByPath.has(key)) return nodesByPath.get(key);
+      const node = { title: pathParts[pathParts.length - 1], uri: null, children: [] };
+      nodesByPath.set(key, node);
+      if (pathParts.length === 1) {
+        roots.push(node);
+      } else {
+        const parent = getOrCreateFolder(pathParts.slice(0, -1));
+        parent.children.push(node);
+      }
+      return node;
+    };
+
+    for (const bm of bookmarks) {
+      const folderNode = getOrCreateFolder(bm.folder.split("/"));
+      folderNode.children.push({ uri: bm.url, title: bm.title || bm.url });
+    }
+
+    return roots;
   }
 
   // ── Container helpers (essential-tab scoping) ───────────────────────────
