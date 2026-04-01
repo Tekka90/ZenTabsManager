@@ -364,6 +364,10 @@ export class SyncManager {
       }
     }
 
+    // Keep the manifest in sync so subsequent syncBidirectional calls don't
+    // treat every tab as a "new local open" and create duplicate bookmarks.
+    await this.rebuildManifest();
+
     return result;
   }
 
@@ -465,36 +469,49 @@ export class SyncManager {
       if (!tabPoolBySpace.has(spaceUuid)) tabPoolBySpace.set(spaceUuid, []);
       const spaceTabPool = tabPoolBySpace.get(spaceUuid);
 
-      // Switch to this workspace BEFORE opening tabs so Zen assigns them here
-      if (gZenWorkspaces?.changeWorkspaceWithID) {
-        try { await gZenWorkspaces.changeWorkspaceWithID(spaceUuid); } catch (e) { /* non-fatal */ }
-      }
-
       if (!spaceFolder.children) continue;
+
+      // Create a lazy-switch callback for this space. On the first call that
+      // actually needs to open a new tab it switches Zen to this workspace so
+      // gBrowser.addTab assigns the tab to the right space. Subsequent calls in
+      // the same space are no-ops.
+      // WHY LAZY? Switching workspace unconditionally fires TabAttrModified for
+      // every tab being shown/hidden. That synchronously refreshes the TabManager
+      // cache for those tabs — potentially with wrong folderPath values if
+      // tab.group is temporarily disconnected during the DOM move. By delaying
+      // the switch until we actually need to open a tab, we avoid polluting the
+      // cache for the common steady-state case where all bookmarks are already open.
+      let workspaceSwitchedForThisSpace = false;
+      const lazySwitch = async () => {
+        if (!workspaceSwitchedForThisSpace && gZenWorkspaces?.changeWorkspaceWithID) {
+          workspaceSwitchedForThisSpace = true;
+          try { await gZenWorkspaces.changeWorkspaceWithID(spaceUuid); } catch (e) { /* non-fatal */ }
+        }
+      };
 
       for (const child of spaceFolder.children) {
         if (child.uri) {
           // Direct bookmark in the space root = pinned tab (had no Zen folder)
           result.bookmarksFound++;
-          this._openOrMatchTab(child.uri, spaceUuid, "pinned", "", spaceTabPool, result);
+          await this._openOrMatchTab(child.uri, spaceUuid, "pinned", "", spaceTabPool, result, lazySwitch);
         } else if (child.uri == null && child.children !== undefined) {
           if (this._isEssentialsFolder(child.title)) {
             const bms = await this.getAllBookmarksInFolder(child.guid);
             result.bookmarksFound += bms.length;
             for (const bm of bms) {
               const fullFolder = bm.folder ? `${child.title}/${bm.folder}` : child.title;
-              this._openOrMatchTab(bm.url, spaceUuid, "essential", fullFolder, spaceTabPool, result);
+              await this._openOrMatchTab(bm.url, spaceUuid, "essential", fullFolder, spaceTabPool, result, lazySwitch);
             }
           } else if (child.title === "Temporary tabs") {
             const bms = await this.getAllBookmarksInFolder(child.guid);
             result.bookmarksFound += bms.length;
             for (const bm of bms) {
               const fullFolder = bm.folder ? `Temporary tabs/${bm.folder}` : "Temporary tabs";
-              this._openOrMatchTab(bm.url, spaceUuid, "normal", fullFolder, spaceTabPool, result);
+              await this._openOrMatchTab(bm.url, spaceUuid, "normal", fullFolder, spaceTabPool, result, lazySwitch);
             }
           } else {
             // Named folder = pinned tab group with a Zen folder
-            await this._openRestoredFolder(child, spaceUuid, spaceTabPool, result, null, "");
+            await this._openRestoredFolder(child, spaceUuid, spaceTabPool, result, null, "", lazySwitch);
           }
         }
       }
@@ -505,12 +522,16 @@ export class SyncManager {
       try { await gZenWorkspaces.changeWorkspaceWithID(previousWorkspace); } catch (e) { /* non-fatal */ }
     }
 
+    // Keep the manifest in sync so subsequent syncBidirectional calls don't
+    // re-open tabs that were just matched.
+    await this.rebuildManifest();
+
     return result;
   }
 
   /**
    * Try to match a bookmark to an unconsumed tab in the pool. If no match,
-   * open a new tab.
+   * switch workspace (lazily, once) and open a new tab.
    *
    * @param {string} url
    * @param {string} spaceUuid
@@ -518,8 +539,9 @@ export class SyncManager {
    * @param {string} folder  - subfolder path relative to space root (e.g. "", "Essentials", "Projects")
    * @param {Array}  spaceTabPool - mutable pool of {url, type, folder, consumed} entries
    * @param {object} result - mutation target for counters
+   * @param {Function|null} lazySwitch - async callback that switches workspace on first call
    */
-  _openOrMatchTab(url, spaceUuid, tabType, folder, spaceTabPool, result) {
+  async _openOrMatchTab(url, spaceUuid, tabType, folder, spaceTabPool, result, lazySwitch = null) {
     if (!url) return;
 
     // Try to consume an unconsumed tab with the same URL and same folder
@@ -530,7 +552,10 @@ export class SyncManager {
       return;
     }
 
-    // No match — open a new tab
+    // No match — ensure workspace is active BEFORE opening the tab
+    if (lazySwitch) await lazySwitch();
+
+    // Open a new tab
     const { gBrowser, gZenWorkspaces } = this.manager.window;
     try {
       const addTabOpts = { inBackground: true, triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() };
@@ -560,7 +585,7 @@ export class SyncManager {
   /**
    * Restore a named bookmark subfolder as nested Zen folder(s).
    */
-  async _openRestoredFolder(folderChild, spaceUuid, spaceTabPool, result, parentFolder = null, parentPath = "") {
+  async _openRestoredFolder(folderChild, spaceUuid, spaceTabPool, result, parentFolder = null, parentPath = "", lazySwitch = null) {
     const { gBrowser } = this.manager.window;
     const gZenFolders = this.manager.window.gZenFolders;
 
@@ -582,7 +607,7 @@ export class SyncManager {
       if (!gZenFolders) {
         // Fallback: restore as individual pinned tabs
         for (const url of directUrls) {
-          this._openOrMatchTab(url, spaceUuid, "pinned", currentPath, spaceTabPool, result);
+          await this._openOrMatchTab(url, spaceUuid, "pinned", currentPath, spaceTabPool, result, lazySwitch);
         }
       } else {
         const createdTabs = [];
@@ -595,6 +620,7 @@ export class SyncManager {
             continue;
           }
           try {
+            if (lazySwitch) await lazySwitch();
             const tab = gBrowser.addTab(url, {
               inBackground: true,
               triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
@@ -641,7 +667,7 @@ export class SyncManager {
     // Recurse into each sub-folder, nesting under the folder we just created
     const nextParent = createdFolder || parentFolder;
     for (const sub of subFolders) {
-      await this._openRestoredFolder(sub, spaceUuid, spaceTabPool, result, nextParent, currentPath);
+      await this._openRestoredFolder(sub, spaceUuid, spaceTabPool, result, nextParent, currentPath, lazySwitch);
     }
   }
 
@@ -742,10 +768,8 @@ export class SyncManager {
       bySpace: {}
     };
 
-    const newManifest = new Map();
-
     // Remember current workspace so we can restore it after the loop
-    // (Steps 3 may switch workspaces to open tabs in the right space).
+    // (Step 3 may switch workspaces to open tabs in the right space).
     const previousWorkspace = gZenWorkspaces?.activeWorkspace ?? null;
 
     // Union of all space UUIDs seen across any source
@@ -987,33 +1011,6 @@ export class SyncManager {
         }
       }
 
-      // ── Step 5: Compute new manifest ───────────────────────────────
-      // Re-read bookmarks for this space after mutations
-      const updatedBm = await this.getBookmarkEntriesBySpace();
-      const updatedB = updatedBm.get(spaceUuid) ?? [];
-
-      // Re-read tabs after mutations
-      const updatedTabs = [];
-      for (const tabData of await this.manager.tabManager.getAllTabs()) {
-        if (tabData.url.startsWith("about:") || tabData.url.startsWith("chrome://")) continue;
-        if (tabData.workspace.id === spaceUuid) updatedTabs.push(tabData);
-      }
-
-      // Build new manifest: match each bookmark to a tab by URL + folder (consume both)
-      const newEntries = [];
-      const tabPool = updatedTabs.map(td => ({ ...td, folder: this._subfolderNameForTab(td), consumed: false }));
-
-      for (const bm of updatedB) {
-        const bmFolder = this._normalizeFolder(bm.folder, spaceUuid);
-        const poolIdx = tabPool.findIndex(e => !e.consumed && e.url === bm.url && e.folder === bmFolder);
-        if (poolIdx !== -1) {
-          const td = tabPool[poolIdx];
-          newEntries.push({ url: bm.url, folder: bmFolder, type: td.type });
-          tabPool[poolIdx].consumed = true;
-        }
-      }
-
-      newManifest.set(spaceUuid, newEntries);
       result.bySpace[spaceName] = spaceResult;
     }
 
@@ -1022,8 +1019,86 @@ export class SyncManager {
       try { await gZenWorkspaces.changeWorkspaceWithID(previousWorkspace); } catch (e) { /* non-fatal */ }
     }
 
-    this.saveManifest(newManifest);
+    // Rebuild the manifest once, after all mutations, using a single
+    // getBookmarkEntriesBySpace() call (replaces the old per-space Step 5
+    // that called it N times inside the loop).
+    await this.rebuildManifest();
     return result;
+  }
+
+  // ── Manifest rebuild ───────────────────────────────────────────────────
+
+  /**
+   * Rebuild the sync manifest from scratch by matching current bookmarks to
+   * current tabs (URL + folder, pool-based, one-to-one).
+   *
+   * Must be called at the end of EVERY sync operation that changes bookmarks
+   * or tabs — not just syncBidirectional. If syncToBookmarks or
+   * syncFromBookmarks run without updating the manifest, the next
+   * syncBidirectional will see those tabs/bookmarks as "new" and create
+   * duplicates.
+   *
+   * Replaces the old per-space Step 5 loop in syncBidirectional (which called
+   * getBookmarkEntriesBySpace() once per space — N round-trips — instead of
+   * one).
+   */
+  async rebuildManifest() {
+    // Refresh the tab metadata cache before reading it.
+    //
+    // Root cause: workspace switching in syncFromBookmarks (and syncBidirectional)
+    // fires TabAttrModified on every tab that is shown/hidden during the transition.
+    // The manager's onTabUpdated handler updates the cache synchronously for each
+    // event. During the DOM reorganisation, tab.group can be temporarily null or
+    // point to a detached element, so getFolderPath() returns null for tabs that
+    // ARE in Zen folders. The cache then holds a stale folderPath=null value.
+    //
+    // By the time rebuildManifest is awaited, all workspace switches are complete
+    // and the DOM is in a stable state. A full rebuildCache() here re-reads every
+    // tab's live group/workspace attributes once, giving us correct folderPaths.
+    // Using optional chaining for test-compat with stubs that only provide getAllTabs.
+    await this.manager.tabManager?.rebuildCache?.({ silent: true });
+
+    const { gZenWorkspaces } = this.manager.window;
+    const bmBySpace = await this.getBookmarkEntriesBySpace();
+
+    // Build tabs by space (same logic as syncBidirectional preamble)
+    const tabsBySpace = new Map();
+    if (gZenWorkspaces) {
+      for (const ws of gZenWorkspaces.getWorkspaces()) tabsBySpace.set(ws.uuid, []);
+    }
+    for (const tabData of await this.manager.tabManager.getAllTabs()) {
+      if (tabData.url.startsWith("about:") || tabData.url.startsWith("chrome://")) continue;
+      const uuid = tabData.workspace.id;
+      if (gZenWorkspaces && !tabsBySpace.has(uuid)) continue;
+      if (!tabsBySpace.has(uuid)) tabsBySpace.set(uuid, []);
+      tabsBySpace.get(uuid).push(tabData);
+    }
+
+    const newManifest = new Map();
+    for (const [spaceUuid, tabs] of tabsBySpace) {
+      const B = bmBySpace.get(spaceUuid) ?? [];
+      const entries = [];
+      const bmPool = B.map(bm => ({
+        url: bm.url,
+        normFolder: this._normalizeFolder(bm.folder, spaceUuid),
+        consumed: false,
+      }));
+      for (const tabData of tabs) {
+        const tabFolder = this._subfolderNameForTab(tabData);
+        const poolIdx = bmPool.findIndex(
+          e => !e.consumed && e.url === tabData.url && e.normFolder === tabFolder
+        );
+        if (poolIdx !== -1) {
+          entries.push({ url: tabData.url, folder: tabFolder, type: tabData.type });
+          bmPool[poolIdx].consumed = true;
+        }
+      }
+      // Always set an entry array (even if empty) so that manifest.size > 0
+      // and the bootstrap guard in syncBidirectional doesn't re-trigger.
+      newManifest.set(spaceUuid, entries);
+    }
+
+    this.saveManifest(newManifest);
   }
 
   // ── PlacesUtils helpers ────────────────────────────────────────────────

@@ -196,13 +196,16 @@ export function makeGZenWorkspaces(workspaces = [], allTabs = []) {
   const byUuid = new Map(workspaces.map(ws => [ws.uuid, ws]));
   let _counter = 1;
   let _activeUuid = workspaces[0]?.uuid ?? null;
+  let _switchCount = 0;
   return {
     getWorkspaces: ()           => workspaces,
     getWorkspaceFromId: (uuid)  => byUuid.get(uuid) ?? null,
     isWorkspaceActive: (ws)     => ws.uuid === _activeUuid,
     get activeWorkspace()       { return _activeUuid; },
     get allStoredTabs()         { return allTabs; },
+    get switchCount()           { return _switchCount; },
     async changeWorkspaceWithID(uuid) {
+      _switchCount++;
       if (byUuid.has(uuid)) _activeUuid = uuid;
     },
     async createAndSaveWorkspace(name, icon = null, dontChange = false, containerTabId = 0) {

@@ -28,7 +28,7 @@ export class TabManager {
   /**
    * Rebuild the tab metadata cache
    */
-  async rebuildCache() {
+  async rebuildCache({ silent = false } = {}) {
     this.tabMetadataCache.clear();
     const win = this.manager.window;
     // allStoredTabs covers all spaces; fall back to gBrowser.tabs before Zen initializes
@@ -39,7 +39,7 @@ export class TabManager {
       this.cacheTabMetadata(tab);
     }
 
-    this.log(`Cache rebuilt with ${this.tabMetadataCache.size} tabs`);
+    if (!silent) this.log(`Cache rebuilt with ${this.tabMetadataCache.size} tabs`);
   }
 
   /**

@@ -2160,3 +2160,314 @@ describe("syncBidirectional — named folder restoration (Step 3)", () => {
     assert.equal(workDirect[0].uri, "https://d.com");
   });
 });
+
+// ── rebuildManifest + cross-sync stale manifest regression ─────────────────
+//
+// Root cause of "4 duplicate bookmarks" incident:
+//   1. syncToBookmarks ran (creates bookmarks)
+//   2. syncBidirectional's auto-sync ran, bootstrapped manifest
+//   3. syncToBookmarks ran again (replaced/updated bookmarks — manifest NOT updated)
+//   4. syncBidirectional ran: 4 tabs appeared "not in manifest" → Step 1 created
+//      duplicate bookmarks for them.
+//
+// Fix: syncToBookmarks and syncFromBookmarks now call rebuildManifest() at the
+//      end. syncBidirectional calls rebuildManifest() instead of Step 5 loop.
+
+describe("rebuildManifest + cross-sync stale manifest regression", () => {
+  test("syncToBookmarks updates the manifest so subsequent syncBidirectional creates no duplicates", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+
+    // Create 3 pinned tabs
+    const tabs = ["https://a.com", "https://b.com", "https://c.com"].map(url => {
+      const t = makeTab({ url, pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+      mgr.window.gBrowser.tabs.push(t);
+      return t;
+    });
+
+    mgr.tabManager = { getAllTabs: async () => tabs.map(t => ({
+      url: t.linkedBrowser.currentURI.spec,
+      title: t.linkedBrowser.currentURI.spec,
+      type: "pinned",
+      workspace: { id: ws.uuid, name: ws.name },
+      tab: t,
+    }))};
+
+    const sync = new SyncManager(mgr);
+
+    // Step 1: syncToBookmarks creates 3 bookmarks AND updates the manifest
+    const r1 = await sync.syncToBookmarks();
+    assert.equal(r1.bookmarksCreated, 3);
+
+    // Manifest should now reflect all 3 pairs
+    const m1 = sync.loadManifest();
+    assert.equal((m1.get(ws.uuid) ?? []).length, 3, "manifest updated by syncToBookmarks");
+
+    // Step 2: syncBidirectional runs — should see everything already in manifest → no changes
+    const r2 = await sync.syncBidirectional();
+    assert.equal(r2.bookmarksCreated, 0, "no duplicate bookmarks");
+    assert.equal(r2.tabsOpened,       0, "no duplicate tabs");
+
+    // Total bookmarks should still be 3
+    const allBms = await mgr.window.PlacesUtils.bookmarks.search({ type: "bookmark" });
+    assert.equal(allBms.length, 3, "exactly 3 bookmarks — no duplicates");
+  });
+
+  test("syncToBookmarks called twice then syncBidirectional — no duplicates", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+
+    const tab = makeTab({ url: "https://site.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    mgr.window.gBrowser.tabs.push(tab);
+    mgr.tabManager = { getAllTabs: async () => [{ url: "https://site.com", title: "Site", type: "pinned", workspace: { id: ws.uuid, name: ws.name }, tab }]};
+
+    const sync = new SyncManager(mgr);
+    await sync.syncToBookmarks();
+    await sync.syncToBookmarks(); // second time — simulates user clicking multiple times
+
+    const r = await sync.syncBidirectional();
+    assert.equal(r.bookmarksCreated, 0, "no duplicates after double syncToBookmarks");
+
+    const allBms = await mgr.window.PlacesUtils.bookmarks.search({ type: "bookmark" });
+    assert.equal(allBms.length, 1, "exactly 1 bookmark");
+  });
+
+  test("syncFromBookmarks updates the manifest so subsequent syncBidirectional creates no duplicates", async () => {
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+
+    // Seed a bookmark — simulates coming from another computer
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://remote.com");
+
+    // Using dynamic getAllTabs so the newly opened tab is visible
+    mgr.tabManager = { getAllTabs: async () =>
+      mgr.window.gBrowser.tabs
+        .filter(t => !t.hasAttribute("zen-empty-tab"))
+        .map(t => ({
+          url: t.linkedBrowser.currentURI.spec,
+          title: "t",
+          type: t.hasAttribute("zen-essential") ? "essential" : t.pinned ? "pinned" : "normal",
+          workspace: { id: t.getAttribute("zen-workspace-id") ?? ws.uuid, name: ws.name },
+          tab: t,
+        }))
+    };
+
+    const sync = new SyncManager(mgr);
+
+    // syncFromBookmarks opens the tab AND updates the manifest
+    const r1 = await sync.syncFromBookmarks();
+    assert.equal(r1.tabsCreated, 1);
+    const m1 = sync.loadManifest();
+    // Note: syncFromBookmarks opens a pinned tab (bookmark in space root)
+    // but normal/other types may not be tracked; at minimum manifest.size > 0
+    assert.ok(m1.size > 0, "manifest updated by syncFromBookmarks");
+
+    // syncBidirectional should see everything already paired — no changes
+    const r2 = await sync.syncBidirectional();
+    assert.equal(r2.bookmarksCreated, 0, "no duplicate bookmarks after syncFromBookmarks + syncBidirectional");
+    assert.equal(r2.tabsOpened,       0, "no duplicate tabs");
+  });
+
+  test("rebuildManifest: all tabs matched to bookmarks appear in manifest", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    // Seed bookmarks
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenF   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const spaceF = await PlacesUtils.bookmarks.insert({ parentGuid: zenF.guid,   type: "folder", title: ws.name });
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://a.com", title: "A" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://b.com", title: "B" });
+
+    // Open matching tabs
+    const tabA = makeTab({ url: "https://a.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    const tabB = makeTab({ url: "https://b.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    mgr.window.gBrowser.tabs.push(tabA, tabB);
+    mgr.tabManager = { getAllTabs: async () => [
+      { url: "https://a.com", title: "A", type: "pinned", workspace: { id: ws.uuid, name: ws.name }, tab: tabA },
+      { url: "https://b.com", title: "B", type: "pinned", workspace: { id: ws.uuid, name: ws.name }, tab: tabB },
+    ]};
+
+    const sync = new SyncManager(mgr);
+    await sync.rebuildManifest();
+
+    const m = sync.loadManifest();
+    const entries = m.get(ws.uuid) ?? [];
+    assert.equal(entries.length, 2);
+    const urls = entries.map(e => e.url).sort();
+    assert.deepEqual(urls, ["https://a.com", "https://b.com"]);
+    // No guids in entries
+    for (const e of entries) {
+      assert.ok(!("guid" in e), "no guid in manifest entry");
+    }
+  });
+
+  test("rebuildManifest: unmatched tabs (no bookmark) are not in manifest", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    // Only 1 bookmark for url A; tab B has no bookmark
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenF   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const spaceF = await PlacesUtils.bookmarks.insert({ parentGuid: zenF.guid,   type: "folder", title: ws.name });
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://a.com", title: "A" });
+
+    const tabA = makeTab({ url: "https://a.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    const tabB = makeTab({ url: "https://b.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    mgr.window.gBrowser.tabs.push(tabA, tabB);
+    mgr.tabManager = { getAllTabs: async () => [
+      { url: "https://a.com", title: "A", type: "pinned", workspace: { id: ws.uuid, name: ws.name }, tab: tabA },
+      { url: "https://b.com", title: "B", type: "pinned", workspace: { id: ws.uuid, name: ws.name }, tab: tabB },
+    ]};
+
+    const sync = new SyncManager(mgr);
+    await sync.rebuildManifest();
+
+    const m = sync.loadManifest();
+    const entries = m.get(ws.uuid) ?? [];
+    assert.equal(entries.length, 1, "only A is in manifest (B has no bookmark)");
+    assert.equal(entries[0].url, "https://a.com");
+  });
+});
+
+// ── Workspace-switch cache-corruption regression ───────────────────────────
+//
+// Root cause of "4 duplicate bookmarks" after running syncFromBookmarks before
+// syncBidirectional:
+//   syncFromBookmarks previously called changeWorkspaceWithID unconditionally for
+//   every space — even when every bookmark already had an open tab. Workspace
+//   switching fires TabAttrModified for every tab being shown/hidden. The
+//   manager's onTabUpdated handler refreshes the TabManager cache synchronously
+//   for each event. During the DOM transition, tab.group can be temporarily
+//   disconnected, so getFolderPath() returns null for tabs that ARE in Zen
+//   folders. The stale folderPath=null value is then used by rebuildManifest(),
+//   causing those tabs to be un-paired from their bookmarks, and syncBidirectional
+//   subsequently treats those tabs as "new local opens" and creates duplicates.
+//
+// Fixes:
+//   1. syncFromBookmarks uses a lazy workspace switch — only switches when a tab
+//      actually needs to be OPENED (not just matched). Avoids all unnecessary
+//      workspace switches in the common steady-state case.
+//   2. rebuildManifest() calls tabManager.rebuildCache({ silent: true }) first,
+//      ensuring it always reads from stable final DOM state regardless of caller.
+
+describe("syncFromBookmarks — lazy workspace switch (no unnecessary switches)", () => {
+  test("when all bookmarks are already open, changeWorkspaceWithID is only called for the final restore", async () => {
+    // Build a single space with 2 bookmarks; both tabs are already open.
+    // The lazy-switch callback must NEVER fire. Only the end-of-sync
+    // "restore previous workspace" switch should increment switchCount.
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenF   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const spaceF = await PlacesUtils.bookmarks.insert({ parentGuid: zenF.guid,   type: "folder", title: ws.name });
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://work.com",  title: "W" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://work2.com", title: "W2" });
+
+    const t1 = makeTab({ url: "https://work.com",  pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    const t2 = makeTab({ url: "https://work2.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    mgr.window.gBrowser.tabs.push(t1, t2);
+    mgr.tabManager = { getAllTabs: async () => [
+      { url: "https://work.com",  title: "W",  type: "pinned", workspace: { id: ws.uuid, name: ws.name }, tab: t1 },
+      { url: "https://work2.com", title: "W2", type: "pinned", workspace: { id: ws.uuid, name: ws.name }, tab: t2 },
+    ]};
+
+    const sync = new SyncManager(mgr);
+    const r = await sync.syncFromBookmarks();
+
+    assert.equal(r.tabsCreated,  0, "no new tabs opened");
+    assert.equal(r.tabsExisting, 2, "both tabs matched");
+    // KEY ASSERTION: only the final "restore previous workspace" call fires (count=1).
+    // Old code would fire switchCount = N_spaces + 1 even when no tabs were needed.
+    assert.equal(mgr.window.gZenWorkspaces.switchCount, 1,
+      "only the restore switch runs — lazy per-space switch must not fire for already-open tabs");
+  });
+
+  test("when a bookmark has no matching tab, changeWorkspaceWithID IS called lazily", async () => {
+    // 2 bookmarks, only 1 has an open tab. The lazy switch must fire once
+    // (for the unmatched bookmark) plus once for the final restore = 2 total.
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenF   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const spaceF = await PlacesUtils.bookmarks.insert({ parentGuid: zenF.guid,   type: "folder", title: ws.name });
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://existing.com",   title: "E" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://new-remote.com", title: "N" });
+
+    const t1 = makeTab({ url: "https://existing.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    mgr.window.gBrowser.tabs.push(t1);
+    mgr.tabManager = { getAllTabs: async () => [
+      { url: "https://existing.com", title: "E", type: "pinned", workspace: { id: ws.uuid, name: ws.name }, tab: t1 },
+    ]};
+
+    const sync = new SyncManager(mgr);
+    const r = await sync.syncFromBookmarks();
+
+    assert.equal(r.tabsCreated,  1, "one new tab opened");
+    assert.equal(r.tabsExisting, 1, "existing tab matched");
+    // 1 lazy switch (for the new tab) + 1 restore = 2
+    assert.equal(mgr.window.gZenWorkspaces.switchCount, 2,
+      "workspace switched once lazily for the new tab plus once for the final restore = 2");
+  });
+
+  test("syncFromBookmarks + syncBidirectional: no duplicates when all tabs already exist", async () => {
+    // This is the scenario that produced 4 duplicate bookmarks:
+    // syncToBookmarks → syncFromBookmarks (all existing) → syncBidirectional → duplicates
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
+    const zenF   = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    const spaceF = await PlacesUtils.bookmarks.insert({ parentGuid: zenF.guid,   type: "folder", title: ws.name });
+    // 3 bookmarks including one in a named Zen folder (the type most affected by
+    // tab.group corruption during workspace switching)
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://a.com", title: "A" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "bookmark", url: "https://b.com", title: "B" });
+    const projF = await PlacesUtils.bookmarks.insert({ parentGuid: spaceF.guid, type: "folder", title: "Projects" });
+    await PlacesUtils.bookmarks.insert({ parentGuid: projF.guid, type: "bookmark", url: "https://c.com", title: "C" });
+
+    // 3 matching tabs (including C in the Projects Zen folder)
+    const tA = makeTab({ url: "https://a.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    const tB = makeTab({ url: "https://b.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    const tC = makeTab({ url: "https://c.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } });
+    mgr.window.gBrowser.tabs.push(tA, tB, tC);
+
+    mgr.tabManager = { getAllTabs: async () => [
+      { url: "https://a.com", title: "A", type: "pinned", folderPath: null,          workspace: { id: ws.uuid, name: ws.name }, tab: tA },
+      { url: "https://b.com", title: "B", type: "pinned", folderPath: null,          workspace: { id: ws.uuid, name: ws.name }, tab: tB },
+      { url: "https://c.com", title: "C", type: "pinned", folderPath: ["Projects"],  workspace: { id: ws.uuid, name: ws.name }, tab: tC },
+    ]};
+
+    const sync = new SyncManager(mgr);
+
+    // Simulate "syncToBookmarks was already run" by building the manifest
+    await sync.rebuildManifest();
+    const m0 = sync.loadManifest();
+    assert.equal((m0.get(ws.uuid) ?? []).length, 3, "all 3 paired in manifest");
+
+    // syncFromBookmarks (everything already open)
+    const r1 = await sync.syncFromBookmarks();
+    assert.equal(r1.tabsCreated, 0,  "no new tabs");
+    assert.equal(r1.tabsExisting, 3, "all 3 existing");
+
+    // Manifest must still be valid after syncFromBookmarks
+    const m1 = sync.loadManifest();
+    assert.equal((m1.get(ws.uuid) ?? []).length, 3,
+      "manifest intact after syncFromBookmarks");
+
+    // syncBidirectional must create 0 duplicates
+    const r2 = await sync.syncBidirectional();
+    assert.equal(r2.bookmarksCreated, 0, "no duplicate bookmarks");
+    assert.equal(r2.tabsOpened,       0, "no duplicate tabs");
+
+    const allBms = await PlacesUtils.bookmarks.search({ type: "bookmark" });
+    assert.equal(allBms.length, 3, "exactly 3 bookmarks — no duplicates");
+  });
+});
