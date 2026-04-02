@@ -27,21 +27,36 @@ export const ZenTabsAPI = {
     if (typeof window.ZenTabsManager === "undefined") {
       throw new Error("ZenTabsManager not initialized");
     }
-    return window.ZenTabsManager.syncManager.syncToBookmarks(options);
+    const mgr  = window.ZenTabsManager;
+    const prev = mgr.preferences.syncDirection;
+    mgr.preferences.syncDirection = "tabs-to-bookmarks";
+    const result = await mgr.syncManager.performSync();
+    mgr.preferences.syncDirection = prev;
+    return result;
   },
 
   async syncFromBookmarks(folderPath) {
     if (typeof window.ZenTabsManager === "undefined") {
       throw new Error("ZenTabsManager not initialized");
     }
-    return window.ZenTabsManager.syncManager.syncFromBookmarks(folderPath);
+    const mgr  = window.ZenTabsManager;
+    const prev = mgr.preferences.syncDirection;
+    mgr.preferences.syncDirection = "bookmarks-to-tabs";
+    const result = await mgr.syncManager.performSync();
+    mgr.preferences.syncDirection = prev;
+    return result;
   },
 
   async syncBidirectional() {
     if (typeof window.ZenTabsManager === "undefined") {
       throw new Error("ZenTabsManager not initialized");
     }
-    return window.ZenTabsManager.syncManager.syncBidirectional();
+    const mgr  = window.ZenTabsManager;
+    const prev = mgr.preferences.syncDirection;
+    mgr.preferences.syncDirection = "bidirectional";
+    const result = await mgr.syncManager.performSync();
+    mgr.preferences.syncDirection = prev;
+    return result;
   },
 
   async cleanupOldTabs(options = {}) {
