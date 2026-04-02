@@ -384,10 +384,12 @@ export class SyncManager {
   // ── Sync entry point ────────────────────────────────────────────────────
 
   /**
-   * Perform sync based on preferences
+   * Perform sync based on preferences.
+   * @param {object} [options]
+   * @param {boolean} [options.force=false] - Skip the paused check (use for manual triggers).
    */
-  async performSync() {
-    if (this.manager.preferences.paused) {
+  async performSync({ force = false } = {}) {
+    if (!force && this.manager.preferences.paused) {
       this.log("Paused — skipping sync");
       return null;
     }

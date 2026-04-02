@@ -196,7 +196,7 @@ export class UIManager {
     console.log("🔖 Syncing tabs to bookmarks...");
     const prev = this.manager.preferences.syncDirection;
     this.manager.preferences.syncDirection = "tabs-to-bookmarks";
-    const result = await this.manager.syncManager.performSync();
+    const result = await this.manager.syncManager.performSync({ force: true });
     this.manager.preferences.syncDirection = prev;
     console.log("✅ Sync complete:", result);
     this.showNotification("Sync Complete", `Created ${result?.bookmarksCreated ?? 0}, updated ${result?.bookmarksUpdated ?? 0} bookmarks`);
@@ -206,7 +206,7 @@ export class UIManager {
     console.log("📥 Syncing bookmarks to tabs...");
     const prev = this.manager.preferences.syncDirection;
     this.manager.preferences.syncDirection = "bookmarks-to-tabs";
-    const result = await this.manager.syncManager.performSync();
+    const result = await this.manager.syncManager.performSync({ force: true });
     this.manager.preferences.syncDirection = prev;
     console.log("✅ Sync complete:", result);
     this.showNotification("Sync Complete", `Created ${result?.tabsCreated ?? 0} tabs, ${result?.tabsExisting ?? 0} already open`);
@@ -216,7 +216,7 @@ export class UIManager {
     console.log("🔄 Performing bidirectional sync...");
     const prev = this.manager.preferences.syncDirection;
     this.manager.preferences.syncDirection = "bidirectional";
-    const result = await this.manager.syncManager.performSync();
+    const result = await this.manager.syncManager.performSync({ force: true });
     this.manager.preferences.syncDirection = prev;
     console.log("✅ Bidirectional sync complete:", result);
     this.showNotification("Bidirectional Sync", `Bookmarks: +${result?.bookmarksCreated ?? 0}, Tabs opened: +${result?.tabsOpened ?? 0}`);

@@ -2671,6 +2671,28 @@ describe("Multi-window safety", () => {
     sync1Resolve(); // let sync1 finish
     await p1;
   });
+
+  test("performSync({ force: true }) runs even when paused", async () => {
+    const ws  = makeWorkspace("W", "uuid-w");
+    const mgr = makeManager({ workspaces: [ws], preferences: { syncDirection: "bidirectional", paused: true } });
+    const sync = new SyncManager(mgr);
+    await sync.init();
+    mgr.tabManager = { getAllTabs: async () => [], rebuildCache: async () => {} };
+
+    const result = await sync.performSync({ force: true });
+    // Should not return null (paused guard bypassed); bidirectional with no data returns a result object.
+    assert.notEqual(result, null, "force:true should bypass the paused guard");
+  });
+
+  test("performSync() without force returns null when paused", async () => {
+    const ws  = makeWorkspace("W", "uuid-w");
+    const mgr = makeManager({ workspaces: [ws], preferences: { syncDirection: "bidirectional", paused: true } });
+    const sync = new SyncManager(mgr);
+    await sync.init();
+
+    const result = await sync.performSync();
+    assert.equal(result, null, "should return null when paused and force is not set");
+  });
 });
 
 // ── zentabs-pending-url: redirect / about:blank tolerance ─────────────────

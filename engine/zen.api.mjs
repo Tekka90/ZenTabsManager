@@ -30,7 +30,7 @@ export const ZenTabsAPI = {
     const mgr  = window.ZenTabsManager;
     const prev = mgr.preferences.syncDirection;
     mgr.preferences.syncDirection = "tabs-to-bookmarks";
-    const result = await mgr.syncManager.performSync();
+    const result = await mgr.syncManager.performSync({ force: true });
     mgr.preferences.syncDirection = prev;
     return result;
   },
@@ -42,7 +42,7 @@ export const ZenTabsAPI = {
     const mgr  = window.ZenTabsManager;
     const prev = mgr.preferences.syncDirection;
     mgr.preferences.syncDirection = "bookmarks-to-tabs";
-    const result = await mgr.syncManager.performSync();
+    const result = await mgr.syncManager.performSync({ force: true });
     mgr.preferences.syncDirection = prev;
     return result;
   },
@@ -54,7 +54,7 @@ export const ZenTabsAPI = {
     const mgr  = window.ZenTabsManager;
     const prev = mgr.preferences.syncDirection;
     mgr.preferences.syncDirection = "bidirectional";
-    const result = await mgr.syncManager.performSync();
+    const result = await mgr.syncManager.performSync({ force: true });
     mgr.preferences.syncDirection = prev;
     return result;
   },
