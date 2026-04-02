@@ -191,26 +191,43 @@ export class SyncManager {
   }
 
   /**
-   * Write a JSON snapshot of the three sync inputs (manifest, live tabs,
-   * bookmarks) to <profileDir>/zentabs-debug/sync-<timestamp>.json.
-   * Only runs when debugMode is enabled. Keeps the 10 most recent files and
-   * removes older ones automatically.
-   *
-   * @param {Map<string, Array>} manifest   - current loaded manifest
-   * @param {Map<string, Array>} tabsBySpace - tabs grouped by space UUID
-   * @param {Map<string, Array>} bmBySpace   - bookmarks grouped by space UUID
+   * Gather a pre-sync snapshot of the three input states (manifest, live tabs,
+   * bookmarks) and write it to <profileDir>/zentabs-debug/sync-<timestamp>.json.
+   * Only runs when debugMode is enabled. Keeps the 10 most recent files.
+   * Called from performSync() before any changes are made.
    */
-  async _writeDebugSnapshot(manifest, tabsBySpace, bmBySpace) {
+  async _writeDebugSnapshot() {
     if (!this.manager.preferences.debugMode) return;
     const IOUtils   = globalThis.IOUtils;
     const PathUtils = globalThis.PathUtils;
-    if (!IOUtils || !PathUtils) return;
+    if (!IOUtils || !PathUtils) {
+      dump("[ZenTabs] _writeDebugSnapshot: IOUtils/PathUtils unavailable\n");
+      return;
+    }
     try {
-      const debugDir = PathUtils.join(PathUtils.profileDir, "zentabs-debug");
-      await IOUtils.makeDirectory(debugDir, { ignoreExisting: true });
-
+      const manifest    = this.loadManifest();
+      const bmBySpace   = await this.getBookmarkEntriesBySpace();
+      const allTabs     = await this.manager.tabManager.getAllTabs();
       const gZenWorkspaces = this.manager.window.gZenWorkspaces;
-      const snapshot = { timestamp: new Date().toISOString(), spaces: {} };
+
+      // Build tabsBySpace from live tabs
+      const tabsBySpace = new Map();
+      if (gZenWorkspaces) {
+        for (const ws of gZenWorkspaces.getWorkspaces()) tabsBySpace.set(ws.uuid, []);
+      }
+      for (const tabData of allTabs) {
+        if (tabData.url.startsWith("about:") || tabData.url.startsWith("chrome://")) continue;
+        const uuid = tabData.workspace?.id;
+        if (!uuid) continue;
+        if (!tabsBySpace.has(uuid)) tabsBySpace.set(uuid, []);
+        tabsBySpace.get(uuid).push(tabData);
+      }
+
+      const snapshot = {
+        timestamp: new Date().toISOString(),
+        syncDirection: this.manager.preferences.syncDirection,
+        spaces: {},
+      };
 
       const allUuids = new Set([...manifest.keys(), ...tabsBySpace.keys(), ...bmBySpace.keys()]);
       for (const spaceUuid of allUuids) {
@@ -228,19 +245,35 @@ export class SyncManager {
         };
       }
 
+      const profileDir = PathUtils.profileDir;
+      if (!profileDir) {
+        dump("[ZenTabs] _writeDebugSnapshot: PathUtils.profileDir is undefined\n");
+        return;
+      }
+
+      const debugDir = PathUtils.join(profileDir, "zentabs-debug");
+      await IOUtils.makeDirectory(debugDir, { ignoreExisting: true });
+
       const ts       = new Date().toISOString().replace(/[:.]/g, "-");
       const filePath = PathUtils.join(debugDir, `sync-${ts}.json`);
       await IOUtils.writeUTF8(filePath, JSON.stringify(snapshot, null, 2));
+      dump(`[ZenTabs] Debug snapshot written: ${filePath}\n`);
 
       // Rotate — keep only the 10 most recent files.
-      const children  = await IOUtils.getChildren(debugDir);
-      const jsonFiles = children.filter(f => f.endsWith(".json")).sort();
-      if (jsonFiles.length > 10) {
-        for (const old of jsonFiles.slice(0, jsonFiles.length - 10)) {
-          await IOUtils.remove(old);
+      // Best-effort: a failure here must not prevent the snapshot from being written.
+      try {
+        const children  = await IOUtils.getChildren(debugDir);
+        const jsonFiles = children.filter(f => f.endsWith(".json")).sort();
+        if (jsonFiles.length > 10) {
+          for (const old of jsonFiles.slice(0, jsonFiles.length - 10)) {
+            await IOUtils.remove(old);
+          }
         }
+      } catch (rotErr) {
+        dump(`[ZenTabs] Debug snapshot rotation failed (non-fatal): ${rotErr}\n`);
       }
     } catch (e) {
+      dump(`[ZenTabs] Failed to write debug snapshot: ${e}\n`);
       console.error("[ZenTabs] Failed to write debug snapshot:", e);
     }
   }
@@ -364,6 +397,11 @@ export class SyncManager {
     _globalSyncLockTime = Date.now();
 
     try {
+      // Write a pre-sync debug snapshot (all three input states) if debugMode is on.
+      // Called after acquiring the lock so concurrent performSync() calls are still
+      // correctly serialised by the lock above.
+      await this._writeDebugSnapshot();
+
       let result;
 
       switch (direction) {
@@ -892,9 +930,6 @@ export class SyncManager {
       if (!tabsBySpace.has(uuid)) tabsBySpace.set(uuid, []);
       tabsBySpace.get(uuid).push(tabData);
     }
-
-    // Write a debug snapshot of all three sync inputs if debugMode is on.
-    await this._writeDebugSnapshot(manifest, tabsBySpace, bmBySpace);
 
     // ── Bootstrap: empty manifest with existing data ─────────────────
     // When the manifest is completely empty but we already have both tabs

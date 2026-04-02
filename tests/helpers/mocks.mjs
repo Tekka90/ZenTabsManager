@@ -365,6 +365,8 @@ export function makeManager({
   globalThis.Services  = Services;
   globalThis.IOUtils   = ioUtils;
   globalThis.PathUtils = pathUtils;
+  // dump() writes to browser stdout in the chrome context; no-op in tests.
+  if (typeof globalThis.dump === "undefined") globalThis.dump = () => {};
 
   const defaultPrefs = {
     enabled:              true,

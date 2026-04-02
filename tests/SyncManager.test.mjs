@@ -2730,18 +2730,21 @@ describe("zentabs-pending-url — redirect/about:blank tolerance in rebuildManif
 // ── _writeDebugSnapshot ────────────────────────────────────────────────────
 
 describe("_writeDebugSnapshot", () => {
+  // Shared helper: attach a no-op tabManager so _writeDebugSnapshot can call getAllTabs.
+  function withTabManager(manager, tabs = []) {
+    manager.tabManager = { getAllTabs: async () => tabs, rebuildCache: async () => {} };
+  }
+
   test("does nothing when debugMode is false", async () => {
     const ws      = makeWorkspace("Alpha");
     const manager = makeManager({ workspaces: [ws], preferences: { debugMode: false } });
     const sync    = new SyncManager(manager);
     await sync.init();
+    withTabManager(manager);
 
-    // Pre-condition: no debug files in the store.
     const before = [...globalThis.IOUtils._store.keys()];
-
-    await sync._writeDebugSnapshot(new Map(), new Map(), new Map());
-
-    const after = [...globalThis.IOUtils._store.keys()];
+    await sync._writeDebugSnapshot();
+    const after  = [...globalThis.IOUtils._store.keys()];
     assert.deepEqual(after, before, "no files should be written when debugMode is false");
   });
 
@@ -2750,26 +2753,29 @@ describe("_writeDebugSnapshot", () => {
     const manager = makeManager({ workspaces: [ws], preferences: { debugMode: true } });
     const sync    = new SyncManager(manager);
     await sync.init();
+    // Pass a tabData-shaped object (TabManager output), not a raw makeTab stub.
+    withTabManager(manager, [
+      { url: "https://a.com", title: "A", type: "essential", workspace: { id: "uuid-beta", name: "Beta" }, folderPath: [] },
+    ]);
 
-    const manifest   = new Map([["uuid-beta", [{ url: "https://a.com", folder: "Essentials", type: "essential" }]]]);
-    const tabsBySpace = new Map([["uuid-beta", []]]);
-    const bmBySpace   = new Map([["uuid-beta", [{ url: "https://a.com", guid: "g1", title: "A", folder: "Essentials" }]]]);
+    // Seed a manifest entry so it shows up in the snapshot.
+    sync.saveManifest(new Map([["uuid-beta", [{ url: "https://a.com", folder: "Essentials", type: "essential" }]]]));
 
-    await sync._writeDebugSnapshot(manifest, tabsBySpace, bmBySpace);
+    await sync._writeDebugSnapshot();
 
     const keys = [...globalThis.IOUtils._store.keys()];
     const snapshotKey = keys.find(k => k.includes("zentabs-debug/sync-") && k.endsWith(".json"));
     assert.ok(snapshotKey, "a snapshot file should have been written");
 
-    const raw = await globalThis.IOUtils.readUTF8(snapshotKey);
+    const raw      = await globalThis.IOUtils.readUTF8(snapshotKey);
     const snapshot = JSON.parse(raw);
 
-    assert.ok(snapshot.timestamp, "snapshot has a timestamp");
+    assert.ok(snapshot.timestamp,     "snapshot has a timestamp");
+    assert.ok(snapshot.syncDirection, "snapshot has syncDirection");
     assert.ok(snapshot.spaces["uuid-beta"], "snapshot has the space entry");
     assert.equal(snapshot.spaces["uuid-beta"].spaceName, "Beta");
     assert.equal(snapshot.spaces["uuid-beta"].manifest.length, 1);
-    assert.equal(snapshot.spaces["uuid-beta"].bookmarks.length, 1);
-    assert.equal(snapshot.spaces["uuid-beta"].tabs.length, 0);
+    assert.equal(snapshot.spaces["uuid-beta"].tabs.length, 1);
   });
 
   test("rotates files — keeps only 10 most recent, deletes the oldest", async () => {
@@ -2777,58 +2783,54 @@ describe("_writeDebugSnapshot", () => {
     const manager = makeManager({ workspaces: [ws], preferences: { debugMode: true } });
     const sync    = new SyncManager(manager);
     await sync.init();
+    withTabManager(manager);
 
     const debugDir = "/tmp/test-profile/zentabs-debug";
 
     // Seed 10 pre-existing snapshot files (alphabetically earlier than any new write).
     for (let i = 1; i <= 10; i++) {
-      const name = `sync-2025-01-0${i < 10 ? "0" + i : i}T00-00-00-000Z.json`;
+      const pad  = String(i).padStart(2, "0");
+      const name = `sync-2025-01-${pad}T00-00-00-000Z.json`;
       globalThis.IOUtils._store.set(`${debugDir}/${name}`, "{}");
     }
 
     // Writing one more snapshot should push total to 11, triggering deletion of the oldest.
-    await sync._writeDebugSnapshot(new Map(), new Map(), new Map());
+    await sync._writeDebugSnapshot();
 
     const keys = [...globalThis.IOUtils._store.keys()].filter(k => k.startsWith(debugDir)).sort();
     assert.equal(keys.length, 10, "should retain exactly 10 files after rotation");
 
-    // The oldest (sync-2025-01-001T...) must have been removed.
-    const oldestGone = keys.every(k => !k.includes("2025-01-001"));
+    // The oldest (sync-2025-01-01T...) must have been removed.
+    const oldestGone = keys.every(k => !k.includes("2025-01-01T"));
     assert.ok(oldestGone, "the oldest file should have been deleted");
   });
 
-  test("syncBidirectional writes a snapshot when debugMode is true", async () => {
-    const ws      = makeWorkspace("Delta", "uuid-delta");
-    const manager = makeManager({ workspaces: [ws], preferences: { debugMode: true, syncDirection: "bidirectional" } });
-    const sync    = new SyncManager(manager);
-    await sync.init();
+  test("performSync writes a snapshot when debugMode is true (regardless of sync direction)", async () => {
+    for (const direction of ["bidirectional", "tabs-to-bookmarks", "bookmarks-to-tabs"]) {
+      _testResetSharedState();
+      const ws      = makeWorkspace("Delta", "uuid-delta");
+      const manager = makeManager({ workspaces: [ws], preferences: { debugMode: true, syncDirection: direction } });
+      const sync    = new SyncManager(manager);
+      await sync.init();
+      withTabManager(manager);
 
-    // Minimal tabManager stub
-    manager.tabManager = {
-      getAllTabs: async () => [],
-      rebuildCache: async () => {},
-    };
+      await sync.performSync();
 
-    await sync.syncBidirectional();
-
-    const keys = [...globalThis.IOUtils._store.keys()];
-    const snapshotWritten = keys.some(k => k.includes("zentabs-debug/sync-") && k.endsWith(".json"));
-    assert.ok(snapshotWritten, "syncBidirectional should write a debug snapshot when debugMode is true");
+      const keys = [...globalThis.IOUtils._store.keys()];
+      const snapshotWritten = keys.some(k => k.includes("zentabs-debug/sync-") && k.endsWith(".json"));
+      assert.ok(snapshotWritten, `performSync with direction=${direction} should write a debug snapshot`);
+    }
   });
 
-  test("syncBidirectional does NOT write a snapshot when debugMode is false", async () => {
+  test("performSync does NOT write a snapshot when debugMode is false", async () => {
     const ws      = makeWorkspace("Epsilon", "uuid-epsilon");
     const manager = makeManager({ workspaces: [ws], preferences: { debugMode: false, syncDirection: "bidirectional" } });
     const sync    = new SyncManager(manager);
     await sync.init();
-
-    manager.tabManager = {
-      getAllTabs: async () => [],
-      rebuildCache: async () => {},
-    };
+    withTabManager(manager);
 
     const keysBefore = new Set(globalThis.IOUtils._store.keys());
-    await sync.syncBidirectional();
+    await sync.performSync();
 
     const newKeys = [...globalThis.IOUtils._store.keys()].filter(k => !keysBefore.has(k));
     const snapshotWritten = newKeys.some(k => k.includes("zentabs-debug/sync-"));
