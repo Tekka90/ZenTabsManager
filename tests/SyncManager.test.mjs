@@ -187,6 +187,8 @@ describe("syncBidirectional — first install (empty manifest)", () => {
     for (const call of calls) {
       assert.equal(call.opts.createLazyBrowser, true,
         `addTab for ${call.url} must use createLazyBrowser: true`);
+      assert.equal(call.opts.skipAnimation, true,
+        `addTab for ${call.url} must use skipAnimation: true`);
     }
   });
 
@@ -579,6 +581,8 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     for (const call of calls) {
       assert.equal(call.opts.createLazyBrowser, true,
         `addTab for ${call.url} should have createLazyBrowser: true`);
+      assert.equal(call.opts.skipAnimation, true,
+        `addTab for ${call.url} should have skipAnimation: true`);
     }
   });
 

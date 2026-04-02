@@ -671,7 +671,10 @@ export class SyncManager {
       // potentially hundreds of tabs being restored this avoids a memory spike.
       // zentabs-pending-url ensures rebuildManifest can still match the tab to
       // its bookmark even though currentURI will be about:blank until loaded.
-      const addTabOpts = { inBackground: true, createLazyBrowser: true, triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() };
+      // skipAnimation prevents _backgroundTabScrollPromise from running — that
+      // code accesses selectedTab.pinned and crashes when selectedTab is null
+      // (which happens right after switching to a workspace that has no tabs yet).
+      const addTabOpts = { inBackground: true, skipAnimation: true, createLazyBrowser: true, triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() };
       if (tabType === "essential") {
         const containerTabId = gZenWorkspaces?.getWorkspaceFromId(spaceUuid)?.containerTabId ?? 0;
         if (containerTabId) addTabOpts.userContextId = containerTabId;
@@ -740,6 +743,7 @@ export class SyncManager {
             if (lazySwitch) await lazySwitch();
             const tab = gBrowser.addTab(url, {
               inBackground: true,
+              skipAnimation: true,
               createLazyBrowser: true,
               triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
             });
@@ -1065,6 +1069,7 @@ export class SyncManager {
         try {
           const addTabOpts = {
             inBackground: true,
+            skipAnimation: true,
             createLazyBrowser: true,
             triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
           };
