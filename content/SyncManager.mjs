@@ -943,6 +943,14 @@ export class SyncManager {
   async syncBidirectional() {
     this.log("Bidirectional sync with manifest...");
 
+    // Refresh the tab metadata cache before reading it so we get the most
+    // current folderPath / workspace values. Without this, cache entries
+    // drifted by tab events fired between the last rebuildManifest and now
+    // (e.g. navigations that happen just after a syncFromBookmarks) would
+    // cause tabs to appear with wrong URLs and trigger spurious bookmark
+    // create/delete cycles.
+    await this.manager.tabManager?.rebuildCache?.({ silent: true });
+
     const { gZenWorkspaces, gBrowser } = this.manager.window;
     const PlacesUtils = this.manager.window.PlacesUtils;
     const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
@@ -952,19 +960,29 @@ export class SyncManager {
     const bmBySpace  = await this.getBookmarkEntriesBySpace();
     const closeRemoved = this.manager.preferences.syncCloseRemovedTabs ?? false;
 
-    // Build tabs by space: spaceUuid → Array<tabData>
+    // Build tabs by space: spaceUuid → Array<{tabData, effectiveUrl}>
+    // effectiveUrl prefers the zentabs-pending-url attribute (set on lazily-opened
+    // tabs that haven't loaded yet) so that about:blank tabs and redirect-landed
+    // tabs are matched by their original intent URL rather than their current URL.
     // Tabs are kept as arrays (not maps) to allow duplicate URLs.
     const tabsBySpace = new Map();
     if (gZenWorkspaces) {
       for (const ws of gZenWorkspaces.getWorkspaces()) tabsBySpace.set(ws.uuid, []);
     }
     for (const tabData of await this.manager.tabManager.getAllTabs()) {
-      if (tabData.url.startsWith("about:") || tabData.url.startsWith("chrome://")) continue;
+      const pendingUrl = tabData.tab?.getAttribute?.("zentabs-pending-url");
+      const effectiveUrl =
+        pendingUrl &&
+        !pendingUrl.startsWith("about:") &&
+        !pendingUrl.startsWith("chrome://") &&
+        tabData.url !== pendingUrl
+          ? pendingUrl : tabData.url;
+      if (effectiveUrl.startsWith("about:") || effectiveUrl.startsWith("chrome://")) continue;
       const uuid = tabData.workspace.id;
       // Skip tabs with no real workspace when gZenWorkspaces is available
       if (gZenWorkspaces && !tabsBySpace.has(uuid)) continue;
       if (!tabsBySpace.has(uuid)) tabsBySpace.set(uuid, []);
-      tabsBySpace.get(uuid).push(tabData);
+      tabsBySpace.get(uuid).push({ tabData, effectiveUrl });
     }
 
     // ── Bootstrap: empty manifest with existing data ─────────────────
@@ -986,14 +1004,14 @@ export class SyncManager {
         const entries = [];
         const bmPool = B.map(bm => ({ ...bm, folder: this._normalizeFolder(bm.folder, spaceUuid), consumed: false }));
 
-        for (const tabData of tabs) {
+        for (const { tabData, effectiveUrl } of tabs) {
           const tabFolder = this._subfolderNameForTab(tabData);
           const poolIdx = bmPool.findIndex(
-            e => !e.consumed && e.url === tabData.url && e.folder === tabFolder
+            e => !e.consumed && e.url === effectiveUrl && e.folder === tabFolder
           );
           if (poolIdx !== -1) {
             const bm = bmPool[poolIdx];
-            entries.push({ url: bm.url, folder: tabFolder, type: tabData.type });
+            entries.push({ url: effectiveUrl, folder: tabFolder, type: tabData.type });
             bmPool[poolIdx].consumed = true;
           }
         }
@@ -1035,7 +1053,7 @@ export class SyncManager {
     for (const spaceUuid of allSpaceUuids) {
       if (spaceUuid === null) continue;
       const M = manifest.get(spaceUuid) ?? [];  // Array<{url, folder, type}>
-      const T = tabsBySpace.get(spaceUuid) ?? []; // Array<tabData>
+      const T = tabsBySpace.get(spaceUuid) ?? []; // Array<{tabData, effectiveUrl}>
       const B = bmBySpace.get(spaceUuid) ?? [];   // Array<{url, guid, title, folder}>
 
       const workspace = gZenWorkspaces?.getWorkspaceFromId(spaceUuid);
@@ -1049,17 +1067,17 @@ export class SyncManager {
       // Normalize manifest folders so old "Essentials" matches the current canonical name.
       const unmatchedManifestKeys = M.map(e => ({ url: e.url, folder: this._normalizeFolder(e.folder, spaceUuid) }));
       const newLocalTabs = [];
-      for (const tabData of T) {
+      for (const { tabData, effectiveUrl } of T) {
         const tabFolder = this._subfolderNameForTab(tabData);
-        const mIdx = unmatchedManifestKeys.findIndex(e => e.url === tabData.url && e.folder === tabFolder);
+        const mIdx = unmatchedManifestKeys.findIndex(e => e.url === effectiveUrl && e.folder === tabFolder);
         if (mIdx !== -1) {
           unmatchedManifestKeys.splice(mIdx, 1); // consume
         } else {
-          newLocalTabs.push(tabData);
+          newLocalTabs.push({ tabData, effectiveUrl });
         }
       }
 
-      for (const tabData of newLocalTabs) {
+      for (const { tabData, effectiveUrl } of newLocalTabs) {
         if (tabData.type === "normal") continue; // never push normal tabs
         const spaceFolderGuid = await this.getOrCreateFolder(zenFolderGuid, spaceName);
         const subFolder = await this.getBookmarkFolderForTab(spaceFolderGuid, tabData);
@@ -1067,7 +1085,7 @@ export class SyncManager {
           parentGuid: subFolder,
           type: this.manager.window.PlacesUtils.bookmarks.TYPE_BOOKMARK,
           title: tabData.title,
-          url: tabData.url
+          url: effectiveUrl
         });
         result.bookmarksCreated++;
         spaceResult.bookmarksCreated++;
@@ -1079,8 +1097,8 @@ export class SyncManager {
       const _tabKey = (url, folder) => `${url}\t${folder}`;
 
       const tabKeyCounts = new Map();
-      for (const td of T) {
-        const key = _tabKey(td.url, this._subfolderNameForTab(td));
+      for (const { tabData: td, effectiveUrl: tdUrl } of T) {
+        const key = _tabKey(tdUrl, this._subfolderNameForTab(td));
         tabKeyCounts.set(key, (tabKeyCounts.get(key) ?? 0) + 1);
       }
 
@@ -1147,7 +1165,7 @@ export class SyncManager {
         for (let i = 0; i < extra; i++) unmatchedBookmarks.push(bms[i]);
       }
       // But some of these may already have matching open tabs. Match by URL + folder.
-      const unmatchedTabPool = T.map(td => ({ url: td.url, type: td.type, folder: this._subfolderNameForTab(td), consumed: false }));
+      const unmatchedTabPool = T.map(({ tabData: td, effectiveUrl: tdUrl }) => ({ url: tdUrl, type: td.type, folder: this._subfolderNameForTab(td), consumed: false }));
 
       // Also mark tabs that were consumed by manifest matching
       // (rebuild: for each manifest entry with a matching tab, consume one tab)

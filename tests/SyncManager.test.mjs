@@ -485,6 +485,88 @@ describe("syncBidirectional — subsequent syncs (non-empty manifest)", () => {
       assert.ok(entry.type, "entry should have a type");
     }
   });
+
+  test("regression: tab with zentabs-pending-url is matched by effectiveUrl, not about:blank", async () => {
+    // A tab opened lazily by a previous syncFromBookmarks still has currentURI=about:blank
+    // but carries zentabs-pending-url with the original bookmark URL.
+    // syncBidirectional must use the pending URL for matching so the tab is
+    // treated as "already open" and no spurious bookmark is created or deleted.
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const lazyTab = makeTab({
+      url: "about:blank",
+      pinned: true,
+      attrs: {
+        "zen-workspace-id": ws.uuid,
+        "zentabs-pending-url": "https://lazy-loaded.com",
+      },
+    });
+    const mgr = makeManager({ workspaces: [ws], tabs: [lazyTab] });
+
+    // Bookmark and manifest both reference the real URL (not about:blank)
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://lazy-loaded.com");
+
+    const sync = new SyncManager(mgr);
+    sync.saveManifest(new Map([[ws.uuid, [
+      { url: "https://lazy-loaded.com", folder: "", type: "pinned" },
+    ]]]));
+
+    mgr.tabManager = {
+      getAllTabs: async () => [{
+        url: "about:blank",
+        title: "Lazy",
+        type: "pinned",
+        workspace: { id: ws.uuid, name: ws.name },
+        tab: lazyTab,
+      }],
+      rebuildCache: async () => {},
+    };
+
+    const r = await sync.syncBidirectional();
+
+    assert.equal(r.bookmarksCreated, 0, "no bookmark should be created for the pending tab");
+    assert.equal(r.bookmarksDeleted, 0, "existing bookmark should NOT be deleted");
+    assert.equal(r.tabsOpened, 0, "no extra tab should be opened");
+  });
+
+  test("regression: tab that navigated to redirect URL is matched via effectiveUrl not redirect", async () => {
+    // A pinned tab whose current URL is an OAuth redirect should still match
+    // the original bookmark URL stored in the manifest.
+    const ws = makeWorkspace("Work", "uuid-work");
+    const redirectedTab = makeTab({
+      url: "https://auth.example.com/oauth/callback?code=123",
+      pinned: true,
+      attrs: {
+        "zen-workspace-id": ws.uuid,
+        "zentabs-pending-url": "https://original-pinned.com",
+      },
+    });
+    const mgr = makeManager({ workspaces: [ws], tabs: [redirectedTab] });
+
+    // Bookmark and manifest use the original URL
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://original-pinned.com");
+
+    const sync = new SyncManager(mgr);
+    sync.saveManifest(new Map([[ws.uuid, [
+      { url: "https://original-pinned.com", folder: "", type: "pinned" },
+    ]]]));
+
+    mgr.tabManager = {
+      getAllTabs: async () => [{
+        url: "https://auth.example.com/oauth/callback?code=123",
+        title: "OAuth",
+        type: "pinned",
+        workspace: { id: ws.uuid, name: ws.name },
+        tab: redirectedTab,
+      }],
+      rebuildCache: async () => {},
+    };
+
+    const r = await sync.syncBidirectional();
+
+    assert.equal(r.bookmarksCreated, 0, "should not create a bookmark for the redirect URL");
+    assert.equal(r.bookmarksDeleted, 0, "should not delete the original bookmark");
+    assert.equal(r.tabsOpened, 0, "should not open a new tab");
+  });
 });
 
 // ── syncToBookmarks (tabs-are-authority) ──────────────────────────────────
