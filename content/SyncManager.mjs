@@ -201,14 +201,36 @@ export class SyncManager {
     const IOUtils   = globalThis.IOUtils;
     const PathUtils = globalThis.PathUtils;
     if (!IOUtils || !PathUtils) {
-      dump("[ZenTabs] _writeDebugSnapshot: IOUtils/PathUtils unavailable\n");
+      this.log("_writeDebugSnapshot: IOUtils/PathUtils unavailable — cannot write snapshot");
       return;
     }
+
+    const profileDir = PathUtils.profileDir;
+    if (!profileDir) {
+      this.log("_writeDebugSnapshot: PathUtils.profileDir is undefined — cannot write snapshot");
+      return;
+    }
+
+    this.log("_writeDebugSnapshot: gathering snapshot data...");
     try {
-      const manifest    = this.loadManifest();
-      const bmBySpace   = await this.getBookmarkEntriesBySpace();
-      const allTabs     = await this.manager.tabManager.getAllTabs();
+      const manifest       = this.loadManifest();
       const gZenWorkspaces = this.manager.window.gZenWorkspaces;
+
+      // Gather bookmarks — non-fatal: a PlacesUtils error should not kill the snapshot.
+      let bmBySpace = new Map();
+      try {
+        bmBySpace = await this.getBookmarkEntriesBySpace();
+      } catch (bmErr) {
+        this.log("_writeDebugSnapshot: could not read bookmarks (non-fatal):", bmErr.message);
+      }
+
+      // Gather tabs — non-fatal.
+      let allTabs = [];
+      try {
+        allTabs = await this.manager.tabManager.getAllTabs();
+      } catch (tabErr) {
+        this.log("_writeDebugSnapshot: could not read tabs (non-fatal):", tabErr.message);
+      }
 
       // Build tabsBySpace from live tabs
       const tabsBySpace = new Map();
@@ -245,19 +267,14 @@ export class SyncManager {
         };
       }
 
-      const profileDir = PathUtils.profileDir;
-      if (!profileDir) {
-        dump("[ZenTabs] _writeDebugSnapshot: PathUtils.profileDir is undefined\n");
-        return;
-      }
-
       const debugDir = PathUtils.join(profileDir, "zentabs-debug");
+      this.log(`_writeDebugSnapshot: creating directory ${debugDir}`);
       await IOUtils.makeDirectory(debugDir, { ignoreExisting: true });
 
       const ts       = new Date().toISOString().replace(/[:.]/g, "-");
       const filePath = PathUtils.join(debugDir, `sync-${ts}.json`);
       await IOUtils.writeUTF8(filePath, JSON.stringify(snapshot, null, 2));
-      dump(`[ZenTabs] Debug snapshot written: ${filePath}\n`);
+      this.log(`_writeDebugSnapshot: snapshot written → ${filePath}`);
 
       // Rotate — keep only the 10 most recent files.
       // Best-effort: a failure here must not prevent the snapshot from being written.
@@ -270,10 +287,10 @@ export class SyncManager {
           }
         }
       } catch (rotErr) {
-        dump(`[ZenTabs] Debug snapshot rotation failed (non-fatal): ${rotErr}\n`);
+        this.log("_writeDebugSnapshot: rotation failed (non-fatal):", rotErr.message);
       }
     } catch (e) {
-      dump(`[ZenTabs] Failed to write debug snapshot: ${e}\n`);
+      this.log("_writeDebugSnapshot: FAILED:", e.message, e.stack ?? "");
       console.error("[ZenTabs] Failed to write debug snapshot:", e);
     }
   }
