@@ -312,14 +312,24 @@ export function makeGZenFolders() {
 
 export function makeIOUtils(initialFiles = {}) {
   const _store = new Map(Object.entries(initialFiles));
+  const _dirs  = new Set();
   return {
-    async exists(path)             { return _store.has(path); },
-    async readUTF8(path)           {
+    async exists(path)                    { return _store.has(path); },
+    async readUTF8(path)                  {
       if (!_store.has(path)) throw new Error(`File not found: ${path}`);
       return _store.get(path);
     },
-    async writeUTF8(path, content) { _store.set(path, content); },
+    async writeUTF8(path, content)        { _store.set(path, content); },
+    async makeDirectory(path)             { _dirs.add(path); },
+    async getChildren(dir)                {
+      return [..._store.keys()].filter(p => {
+        const parent = p.substring(0, p.lastIndexOf("/"));
+        return parent === dir;
+      });
+    },
+    async remove(path)                    { _store.delete(path); },
     _store,
+    _dirs,
   };
 }
 
