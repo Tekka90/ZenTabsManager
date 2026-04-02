@@ -610,12 +610,26 @@ export class SyncManager {
 
     // Build a pool of open tabs per space: spaceUuid → Array<{url, type, folder, consumed}>
     // Each tab can only be matched to one bookmark (consumed from pool).
+    //
+    // IMPORTANT: use zentabs-pending-url as a fallback, just like rebuildManifest does.
+    // Tabs opened by a previous syncFromBookmarks call use createLazyBrowser:true and
+    // stay on about:blank until the user selects them. Zen Browser's ZenSessionManager
+    // does not surface the pending URL via SessionStore.getTabState, so _extractTabUrl
+    // falls back to "about:blank". Without the pendingUrl fallback those tabs can never
+    // be matched and the sync re-creates them as duplicates on every run.
     const allTabs = await this.manager.tabManager.getAllTabs();
     const tabPoolBySpace = new Map();
     for (const tabData of allTabs) {
       const spaceId = tabData.workspace.id;
       if (!tabPoolBySpace.has(spaceId)) tabPoolBySpace.set(spaceId, []);
-      tabPoolBySpace.get(spaceId).push({ url: tabData.url, type: tabData.type, folder: this._subfolderNameForTab(tabData), consumed: false });
+      const pendingUrl = tabData.tab?.getAttribute?.("zentabs-pending-url");
+      const effectiveUrl =
+        pendingUrl &&
+        !pendingUrl.startsWith("about:") &&
+        !pendingUrl.startsWith("chrome://") &&
+        tabData.url !== pendingUrl
+          ? pendingUrl : tabData.url;
+      tabPoolBySpace.get(spaceId).push({ url: effectiveUrl, type: tabData.type, folder: this._subfolderNameForTab(tabData), consumed: false });
     }
 
     // Build name → uuid lookup for all existing spaces

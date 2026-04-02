@@ -1037,6 +1037,47 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
       );
     }
   });
+
+  test("regression: lazy tab (about:blank + zentabs-pending-url) is matched to its bookmark and not re-created", async () => {
+    // Reproduces the bug where every subsequent syncFromBookmarks call re-creates tabs
+    // that were opened by the previous sync but haven't loaded yet (createLazyBrowser:true
+    // keeps them on about:blank). Without the zentabs-pending-url fallback in the pool
+    // builder, those tabs were invisible to URL matching and new duplicates accumulated
+    // on every sync.
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://lazy-tab.com");
+
+    // Simulate a lazy tab that was opened by the previous sync but hasn't loaded:
+    // currentURI.spec is still "about:blank", but zentabs-pending-url holds the real URL.
+    const lazyTab = makeTab({
+      url: "about:blank",
+      attrs: {
+        "zen-workspace-id":     ws.uuid,
+        "zentabs-pending-url":  "https://lazy-tab.com",
+      },
+    });
+    // _extractTabUrl will return "about:blank" for this tab (no SessionStore in tests).
+    assert.equal(lazyTab.linkedBrowser.currentURI.spec, "about:blank");
+
+    mgr.tabManager = {
+      getAllTabs: async () => [{
+        url: "about:blank",   // tabData.url as returned by _extractTabUrl
+        title: "Loading…",
+        type: "pinned",
+        folderPath: null,
+        workspace: { id: ws.uuid, name: ws.name },
+        tab: lazyTab,         // the DOM element with zentabs-pending-url attribute
+      }],
+    };
+
+    const sync = new SyncManager(mgr);
+    const r = await sync.syncFromBookmarks();
+
+    // The lazy tab must be recognised as existing, not spawned again as a duplicate.
+    assert.equal(r.tabsExisting, 1, "lazy tab should be matched via zentabs-pending-url");
+    assert.equal(r.tabsCreated,  0, "no new tab should be created for an already-open lazy tab");
+  });
 });
 
 // ── Essential tab container scoping ───────────────────────────────────────
