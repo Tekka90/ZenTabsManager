@@ -312,6 +312,25 @@ describe("syncBidirectional — first install (empty manifest)", () => {
     assert.equal(r.tabsOpened, 0);
     assert.equal(mgr.window.gBrowser._removed.length, 0);
   });
+
+  test("regression: tabs opened by syncBidirectional carry skipbackgroundnotify attribute", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://work-a.com");
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://work-b.com");
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    await sync.syncBidirectional();
+
+    for (const tab of mgr.window.gBrowser.tabs) {
+      assert.ok(
+        tab.hasAttribute("skipbackgroundnotify"),
+        `bidirectional tab for ${tab.linkedBrowser.currentURI.spec} must have skipbackgroundnotify`
+      );
+    }
+  });
 });
 
 // ── syncBidirectional: subsequent syncs ───────────────────────────────────
@@ -985,6 +1004,38 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
     assert.equal(r.tabsExisting, 1, "Projects tab matches Projects bookmark");
     // Research bookmark has no matching tab → new tab created
     assert.equal(r.tabsCreated, 1, "new tab created for Research bookmark");
+  });
+
+  test("regression: tabs opened during sync carry skipbackgroundnotify to prevent _backgroundTabScrollPromise crash on empty workspace switch", async () => {
+    // On a clean profile, switching to an empty workspace after opening many tabs
+    // can cause a pending _backgroundTabScrollPromise to fire with selectedTab === null,
+    // crashing at selectedTab.pinned.  The fix is to set skipbackgroundnotify on every
+    // tab we create so _handleNewTab skips the _notifyBackgroundTab call entirely.
+    const ws1 = makeWorkspace("Work",     "uuid-work");
+    const ws2 = makeWorkspace("Personal", "uuid-personal");
+    const mgr = makeManager({ workspaces: [ws1, ws2], tabs: [] });
+
+    // Seed several bookmarks across both spaces
+    await seedBookmark(mgr.window.PlacesUtils, ws1.name, "https://work1.com");
+    await seedBookmark(mgr.window.PlacesUtils, ws1.name, "https://work2.com");
+    await seedBookmark(mgr.window.PlacesUtils, ws2.name, "https://personal1.com");
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const calls = mgr.window.gBrowser._addTabCalls;
+    assert.ok(calls.length >= 3, "at least 3 tabs should have been opened");
+
+    // Every created tab must have the skipbackgroundnotify attribute to prevent
+    // the _backgroundTabScrollPromise / selectedTab null crash.
+    for (const tab of mgr.window.gBrowser.tabs) {
+      assert.ok(
+        tab.hasAttribute("skipbackgroundnotify"),
+        `tab for ${tab.linkedBrowser.currentURI.spec} must have skipbackgroundnotify attribute`
+      );
+    }
   });
 });
 

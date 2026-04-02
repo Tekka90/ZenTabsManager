@@ -781,9 +781,10 @@ export class SyncManager {
       // potentially hundreds of tabs being restored this avoids a memory spike.
       // zentabs-pending-url ensures rebuildManifest can still match the tab to
       // its bookmark even though currentURI will be about:blank until loaded.
-      // skipAnimation prevents _backgroundTabScrollPromise from running — that
-      // code accesses selectedTab.pinned and crashes when selectedTab is null
-      // (which happens right after switching to a workspace that has no tabs yet).
+      // skipbackgroundnotify prevents _notifyBackgroundTab from being called in
+      // _handleNewTab — that code creates a _backgroundTabScrollPromise which
+      // accesses selectedTab.pinned and crashes when selectedTab is null (which
+      // happens when switching to an empty workspace on a clean profile).
       const addTabOpts = { inBackground: true, skipAnimation: true, createLazyBrowser: true, triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() };
       if (tabType === "essential") {
         const containerTabId = gZenWorkspaces?.getWorkspaceFromId(spaceUuid)?.containerTabId ?? 0;
@@ -791,6 +792,7 @@ export class SyncManager {
       }
       const tab = gBrowser.addTab(url, addTabOpts);
       if (!tab) { result.errors++; return; }
+      tab.setAttribute("skipbackgroundnotify", "true");
       tab.setAttribute("zen-workspace-id", spaceUuid);
       // Record the intent URL so rebuildManifest can match this tab to its
       // bookmark even if the tab hasn't loaded yet (currentURI = about:blank)
@@ -858,6 +860,7 @@ export class SyncManager {
               triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
             });
             if (!tab) { result.errors++; continue; }
+            tab.setAttribute("skipbackgroundnotify", "true");
             tab.setAttribute("zen-workspace-id", spaceUuid);
             // Record the intent URL for rebuildManifest fallback matching.
             tab.setAttribute("zentabs-pending-url", url);
@@ -1189,6 +1192,7 @@ export class SyncManager {
           }
           const tab = gBrowser.addTab(bm.url, addTabOpts);
           if (tab) {
+            tab.setAttribute("skipbackgroundnotify", "true");
             tab.setAttribute("zen-workspace-id", spaceUuid);
             // Record the intent URL for rebuildManifest fallback matching.
             tab.setAttribute("zentabs-pending-url", bm.url);
