@@ -666,7 +666,12 @@ export class SyncManager {
     // Open a new tab
     const { gBrowser, gZenWorkspaces } = this.manager.window;
     try {
-      const addTabOpts = { inBackground: true, triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() };
+      // createLazyBrowser: true prevents Gecko from starting a content process
+      // for the new tab — it stays unloaded until the user selects it.  With
+      // potentially hundreds of tabs being restored this avoids a memory spike.
+      // zentabs-pending-url ensures rebuildManifest can still match the tab to
+      // its bookmark even though currentURI will be about:blank until loaded.
+      const addTabOpts = { inBackground: true, createLazyBrowser: true, triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() };
       if (tabType === "essential") {
         const containerTabId = gZenWorkspaces?.getWorkspaceFromId(spaceUuid)?.containerTabId ?? 0;
         if (containerTabId) addTabOpts.userContextId = containerTabId;
@@ -735,6 +740,7 @@ export class SyncManager {
             if (lazySwitch) await lazySwitch();
             const tab = gBrowser.addTab(url, {
               inBackground: true,
+              createLazyBrowser: true,
               triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
             });
             if (!tab) { result.errors++; continue; }
@@ -1059,6 +1065,7 @@ export class SyncManager {
         try {
           const addTabOpts = {
             inBackground: true,
+            createLazyBrowser: true,
             triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()
           };
           if (tabType === "essential") {

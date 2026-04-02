@@ -21,26 +21,42 @@ function makeWorkspace(name, uuid = `uuid-${name}`) {
 
 /**
  * Seed a "Zen/<spaceName>/<subFolder>" bookmark and return its guid.
+ * Uses find-or-create for the Zen and space folders so multiple calls
+ * for the same space correctly share the same folder hierarchy.
  */
 async function seedBookmark(PlacesUtils, spaceName, url, title = url, subFolder = null) {
   const toolbarGuid = PlacesUtils.bookmarks.toolbarGuid;
-  const zenFolder = await PlacesUtils.bookmarks.insert({
-    parentGuid: toolbarGuid, type: "folder", title: "Zen"
-  });
-  const spaceFolder = await PlacesUtils.bookmarks.insert({
-    parentGuid: zenFolder.guid, type: "folder", title: spaceName
-  });
-  let parentGuid = spaceFolder.guid;
+
+  // Find existing "Zen" folder or create it
+  const zenCandidates = await PlacesUtils.bookmarks.search({ query: "Zen", type: PlacesUtils.bookmarks.TYPE_FOLDER });
+  let zenFolderGuid = zenCandidates.find(b => b.title === "Zen" && b.parentGuid === toolbarGuid)?.guid;
+  if (!zenFolderGuid) {
+    const zenFolder = await PlacesUtils.bookmarks.insert({ parentGuid: toolbarGuid, type: "folder", title: "Zen" });
+    zenFolderGuid = zenFolder.guid;
+  }
+
+  // Find existing space folder or create it
+  const spaceCandidates = await PlacesUtils.bookmarks.search({ query: spaceName, type: PlacesUtils.bookmarks.TYPE_FOLDER });
+  let spaceFolderGuid = spaceCandidates.find(b => b.title === spaceName && b.parentGuid === zenFolderGuid)?.guid;
+  if (!spaceFolderGuid) {
+    const spaceFolder = await PlacesUtils.bookmarks.insert({ parentGuid: zenFolderGuid, type: "folder", title: spaceName });
+    spaceFolderGuid = spaceFolder.guid;
+  }
+
+  let parentGuid = spaceFolderGuid;
   if (subFolder) {
-    const sf = await PlacesUtils.bookmarks.insert({
-      parentGuid, type: "folder", title: subFolder
-    });
-    parentGuid = sf.guid;
+    const sfCandidates = await PlacesUtils.bookmarks.search({ query: subFolder, type: PlacesUtils.bookmarks.TYPE_FOLDER });
+    let sfGuid = sfCandidates.find(b => b.title === subFolder && b.parentGuid === spaceFolderGuid)?.guid;
+    if (!sfGuid) {
+      const sf = await PlacesUtils.bookmarks.insert({ parentGuid, type: "folder", title: subFolder });
+      sfGuid = sf.guid;
+    }
+    parentGuid = sfGuid;
   }
   const bm = await PlacesUtils.bookmarks.insert({
     parentGuid, type: "bookmark", title, url
   });
-  return { bmGuid: bm.guid, spaceFolderGuid: spaceFolder.guid, zenFolderGuid: zenFolder.guid };
+  return { bmGuid: bm.guid, spaceFolderGuid, zenFolderGuid };
 }
 
 // ── Manifest persistence ────────────────────────────────────────────────────
@@ -153,6 +169,25 @@ describe("syncBidirectional — first install (empty manifest)", () => {
     // Bookmark should be in the store
     const bms = await mgr.window.PlacesUtils.bookmarks.search({ url: "https://example.com" });
     assert.equal(bms.length, 1);
+  });
+
+  test("tabs opened by syncBidirectional use createLazyBrowser to avoid loading pages immediately", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://remote1.example.com");
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://remote2.example.com");
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    await sync.syncBidirectional();
+
+    const calls = mgr.window.gBrowser._addTabCalls;
+    assert.ok(calls.length >= 2, "should have called addTab at least twice");
+    for (const call of calls) {
+      assert.equal(call.opts.createLazyBrowser, true,
+        `addTab for ${call.url} must use createLazyBrowser: true`);
+    }
   });
 
   test("bookmarks from another computer open as tabs with correct type", async () => {
@@ -526,6 +561,25 @@ describe("syncFromBookmarks — bookmarks are authority", () => {
 
     assert.equal(r.tabsCreated, 1);
     assert.equal(mgr.window.gBrowser.tabs.length, 1);
+  });
+
+  test("tabs created during sync use createLazyBrowser to avoid loading all pages", async () => {
+    const ws = makeWorkspace("Personal", "uuid-personal");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://lazy1.com");
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://lazy2.com");
+
+    mgr.tabManager = { getAllTabs: async () => [] };
+
+    const sync = new SyncManager(mgr);
+    await sync.syncFromBookmarks();
+
+    const calls = mgr.window.gBrowser._addTabCalls;
+    assert.ok(calls.length >= 2, "should have called addTab at least twice");
+    for (const call of calls) {
+      assert.equal(call.opts.createLazyBrowser, true,
+        `addTab for ${call.url} should have createLazyBrowser: true`);
+    }
   });
 
   test("already-open tabs are not duplicated", async () => {

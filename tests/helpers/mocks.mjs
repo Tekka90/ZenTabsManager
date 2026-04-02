@@ -168,9 +168,12 @@ export function makeGBrowser(tabs = []) {
   const openTabs = [...tabs];
   const removed = [];
   const discarded = [];
+  const addTabCalls = []; // records { url, opts } for every addTab invocation
   return {
     get tabs() { return openTabs; },
+    get _addTabCalls() { return addTabCalls; },
     addTab(url, opts) {
+      addTabCalls.push({ url, opts: { ...opts } });
       const tab = makeTab({ url, lastAccessed: Date.now() });
       if (opts?.userContextId !== undefined) tab.setAttribute("usercontextid", String(opts.userContextId));
       openTabs.push(tab);
