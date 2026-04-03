@@ -151,6 +151,8 @@ export function makeTab(overrides = {}) {
     linkedBrowser: {
       currentURI: { spec: overrides.url ?? "about:blank" },
       isRemoteBrowser: true,
+      // Optional internal session data for lazy/pending tab simulation
+      __SS_data: overrides.__SS_data ?? undefined,
     },
     hasAttribute(name) { return attrs.has(name); },
     getAttribute(name) { return attrs.get(name) ?? null; },

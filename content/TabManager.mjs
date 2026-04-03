@@ -88,8 +88,15 @@ export class TabManager {
    * Extract the best available URL for a tab.
    *
    * During session restore, or for tabs in inactive Zen Spaces, the browser's
-   * currentURI is "about:blank".  In those cases we consult SessionStore for
-   * the real URL that will be loaded when the tab is restored/activated.
+   * currentURI is "about:blank".  In those cases we consult several sources in
+   * order of reliability:
+   *   1. _zenPinnedInitialState  — Zen's own canonical URL for pinned tabs
+   *   2. currentURI              — already loaded tabs
+   *   3. userTypedValue          — user typed a URL that isn't persisted yet
+   *   4. __SS_data               — Firefox's internal per-tab session payload
+   *                                (set for lazy/pending restored tabs before
+   *                                 SessionStore.getTabState fills in)
+   *   5. SessionStore.getTabState — full session JSON for the tab
    */
   _extractTabUrl(tab) {
     // For pinned tabs, Zen stores the canonical "pinned URL" in _zenPinnedInitialState.
@@ -105,6 +112,22 @@ export class TabManager {
 
     // Pending tabs: Firefox stores a userTypedValue on the browser
     if (browser?.userTypedValue) return browser.userTypedValue;
+
+    // Firefox keeps internal per-tab session data in __SS_data on the browser
+    // element for lazy/pending tabs (set during session restore before the tab
+    // is actually loaded). This is more reliable for inactive Zen spaces than
+    // SessionStore.getTabState because Zen's custom ZenSessionManager can
+    // intercept / alter the public SessionStore API.
+    try {
+      const ssData = browser?.__SS_data;
+      if (ssData) {
+        const entries = ssData.tabData?.entries ?? ssData.entries ?? [];
+        const last = entries[entries.length - 1];
+        if (last?.url && !last.url.startsWith("about:") && !last.url.startsWith("chrome:")) {
+          return last.url;
+        }
+      }
+    } catch (e) { /* non-fatal */ }
 
     // SessionStore keeps the full tab state including the URL
     try {
@@ -170,18 +193,43 @@ export class TabManager {
   }
 
   /**
-   * Get folder path for a tab
+   * Get folder path for a tab.
+   *
+   * When the tab's Zen space is active, `tab.group` traversal yields the
+   * correct path. When the space is *inactive* (e.g. NIQ while the user is
+   * browsing Perso), Zen detaches the tab container from the DOM and
+   * `tab.group` becomes null — even though the tab genuinely belongs to a
+   * named folder. Without a fallback this makes every inactive pinned tab
+   * look like it has no folder, causing mismatches against bookmarks and
+   * triggering duplicate tab/folder creation.
+   *
+   * Fix: persist the last known path as a `zentabs-folder-path` attribute
+   * on the tab element. On the next read (possibly after a workspace switch
+   * or browser restart) we use the attribute when `tab.group` is null.
    */
   getFolderPath(tab) {
     const path = [];
     let current = tab.group;
-    
+
     while (current && current.isZenFolder) {
       path.unshift(current.label || 'Unnamed Folder');
       current = current.group;
     }
-    
-    return path.length > 0 ? path : null;
+
+    if (path.length > 0) {
+      // Save the authoritative path so it survives space deactivation and
+      // browser restarts (Zen's session manager persists custom attributes).
+      tab.setAttribute?.("zentabs-folder-path", path.join("/"));
+      return path;
+    }
+
+    // Fallback: use the previously cached attribute.
+    // Only non-empty values are stored, so an attribute value of "" never
+    // appears here — returning null for genuinely root-level pinned tabs.
+    const cached = tab.getAttribute?.("zentabs-folder-path");
+    if (cached) return cached.split("/");
+
+    return null;
   }
 
   /**

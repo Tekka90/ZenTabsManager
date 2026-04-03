@@ -814,6 +814,10 @@ export class SyncManager {
       // bookmark even if the tab hasn't loaded yet (currentURI = about:blank)
       // or has redirected to a different URL (e.g. an auth/error page).
       tab.setAttribute("zentabs-pending-url", url);
+      // Persist the folder path so getFolderPath() can return the correct
+      // value for inactive-space tabs where tab.group is transiently null.
+      // Without this, the next sync sees folder="" and creates a duplicate.
+      if (folder) tab.setAttribute("zentabs-folder-path", folder);
       if (tabType === "essential") {
         tab.setAttribute("zen-essential", "true");
         gBrowser.pinTab(tab);
@@ -880,6 +884,8 @@ export class SyncManager {
             tab.setAttribute("zen-workspace-id", spaceUuid);
             // Record the intent URL for rebuildManifest fallback matching.
             tab.setAttribute("zentabs-pending-url", url);
+            // Persist folder so inactive-space syncs don't lose the path.
+            tab.setAttribute("zentabs-folder-path", currentPath);
             createdTabs.push(tab);
             spaceTabPool.push({ url, type: "pinned", folder: currentPath, consumed: true });
           } catch (e) {
@@ -965,11 +971,20 @@ export class SyncManager {
     // tabs that haven't loaded yet) so that about:blank tabs and redirect-landed
     // tabs are matched by their original intent URL rather than their current URL.
     // Tabs are kept as arrays (not maps) to allow duplicate URLs.
+    //
+    // rawCountBySpace tracks ALL tabs per space BEFORE the about:blank filter so
+    // the step-2 safety guard (below) can distinguish "space has no tabs" from
+    // "space has tabs that are all unloaded in an inactive Zen space".
     const tabsBySpace = new Map();
+    const rawCountBySpace = new Map(); // spaceUuid → count before URL filtering
     if (gZenWorkspaces) {
       for (const ws of gZenWorkspaces.getWorkspaces()) tabsBySpace.set(ws.uuid, []);
     }
     for (const tabData of await this.manager.tabManager.getAllTabs()) {
+      // Count every tab (before URL filtering) for the safety guard
+      const rawUuid = tabData.workspace.id;
+      rawCountBySpace.set(rawUuid, (rawCountBySpace.get(rawUuid) ?? 0) + 1);
+
       const pendingUrl = tabData.tab?.getAttribute?.("zentabs-pending-url");
       const effectiveUrl =
         pendingUrl &&
@@ -1094,8 +1109,21 @@ export class SyncManager {
       // ── Step 2: Closed locally → delete from bookmarks ─────────────
       // Manifest entries whose URL+folder no longer has a tab but whose
       // bookmark still exists.
+      //
+      // Safety guard: when a space has raw tabs (visible in allStoredTabs)
+      // but ALL of them were filtered out because their URL is about:blank /
+      // chrome:// (inactive Zen space — tabs haven't loaded yet), we CANNOT
+      // tell whether a tab is genuinely gone or is just unloaded.  Treating
+      // every manifest entry as "closed locally" would delete every bookmark
+      // for that space incorrectly.  Skip step 2 entirely for such spaces;
+      // the next sync (after the user visits the space and tabs load) will
+      // correctly detect any real closures.
+      const rawCount = rawCountBySpace.get(spaceUuid) ?? 0;
+      const hasInvisibleTabs = rawCount > 0 && T.length === 0;
+
       const _tabKey = (url, folder) => `${url}\t${folder}`;
 
+      // tabKeyCounts and manifestKeyCounts are also used in steps 3 and 4.
       const tabKeyCounts = new Map();
       for (const { tabData: td, effectiveUrl: tdUrl } of T) {
         const key = _tabKey(tdUrl, this._subfolderNameForTab(td));
@@ -1108,39 +1136,41 @@ export class SyncManager {
         manifestKeyCounts.set(key, (manifestKeyCounts.get(key) ?? 0) + 1);
       }
 
-      // For each URL+folder in manifest, if tab count < manifest count, some were closed
-      const closedLocally = []; // guids of bookmarks to delete
-      const closedKeyBudget = new Map();
-      for (const [key, mCount] of manifestKeyCounts) {
-        const tCount = tabKeyCounts.get(key) ?? 0;
-        if (tCount < mCount) {
-          closedKeyBudget.set(key, mCount - tCount);
-        }
-      }
-      // Pool-based deletion: find actual bookmarks in B by URL+folder key.
-      // No manifest GUIDs needed — correct even after Firefox Sync replaces them.
-      const bmStep2Pool = B.map(bm => ({
-        guid: bm.guid, url: bm.url,
-        normFolder: this._normalizeFolder(bm.folder, spaceUuid), consumed: false
-      }));
-      for (const [key, budget] of closedKeyBudget) {
-        let remaining = budget;
-        for (const entry of bmStep2Pool) {
-          if (remaining <= 0) break;
-          if (entry.consumed) continue;
-          if (_tabKey(entry.url, entry.normFolder) === key) {
-            closedLocally.push(entry.guid);
-            entry.consumed = true;
-            remaining--;
+      if (!hasInvisibleTabs) {
+        // For each URL+folder in manifest, if tab count < manifest count, some were closed
+        const closedLocally = []; // guids of bookmarks to delete
+        const closedKeyBudget = new Map();
+        for (const [key, mCount] of manifestKeyCounts) {
+          const tCount = tabKeyCounts.get(key) ?? 0;
+          if (tCount < mCount) {
+            closedKeyBudget.set(key, mCount - tCount);
           }
         }
-      }
+        // Pool-based deletion: find actual bookmarks in B by URL+folder key.
+        // No manifest GUIDs needed — correct even after Firefox Sync replaces them.
+        const bmStep2Pool = B.map(bm => ({
+          guid: bm.guid, url: bm.url,
+          normFolder: this._normalizeFolder(bm.folder, spaceUuid), consumed: false
+        }));
+        for (const [key, budget] of closedKeyBudget) {
+          let remaining = budget;
+          for (const entry of bmStep2Pool) {
+            if (remaining <= 0) break;
+            if (entry.consumed) continue;
+            if (_tabKey(entry.url, entry.normFolder) === key) {
+              closedLocally.push(entry.guid);
+              entry.consumed = true;
+              remaining--;
+            }
+          }
+        }
 
-      for (const guid of closedLocally) {
-        await this.deleteBookmark(guid);
-        result.bookmarksDeleted++;
-        spaceResult.bookmarksDeleted++;
-      }
+        for (const guid of closedLocally) {
+          await this.deleteBookmark(guid);
+          result.bookmarksDeleted++;
+          spaceResult.bookmarksDeleted++;
+        }
+      } // end !hasInvisibleTabs
 
       // Ensure workspace has a dedicated container if essential bookmarks
       // are present, so essential tabs are properly scoped per-workspace.
@@ -1230,6 +1260,8 @@ export class SyncManager {
             tab.setAttribute("zen-workspace-id", spaceUuid);
             // Record the intent URL for rebuildManifest fallback matching.
             tab.setAttribute("zentabs-pending-url", bm.url);
+            // Persist the folder so inactive-space syncs don't lose the path.
+            if (bmFolder) tab.setAttribute("zentabs-folder-path", bmFolder);
             if (tabType === "essential") {
               tab.setAttribute("zen-essential", "true");
               gBrowser.pinTab(tab);

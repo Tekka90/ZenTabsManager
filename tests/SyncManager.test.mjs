@@ -3033,3 +3033,171 @@ describe("_writeDebugSnapshot", () => {
     assert.ok(!snapshotWritten, "no snapshot file should be written when debugMode is false");
   });
 });
+
+// ── Regression: inactive-space snowball ───────────────────────────────────
+//
+// Tabs in non-active Zen spaces (e.g. NIQ while the user is in Perso) can
+// return about:blank as their URL and null as their folder path because Zen
+// detaches those tabs from the DOM group.  Before these fixes:
+//   - Step 2 treated ALL manifested tabs as "closed locally" → deleted all bookmarks
+//   - syncFromBookmarks opened duplicate tabs (URL mismatch, folder mismatch)
+//   - Each restart/sync made the situation progressively worse (snowball)
+
+describe("regression: inactive-space tabs don't trigger duplicate creation", () => {
+
+  /**
+   * Build a tab stub that simulates a pinned tab in an inactive Zen space:
+   *   - currentURI = about:blank (tab never loaded in this session)
+   *   - tab.group  = null        (detached from Zen folder DOM node)
+   *   - zentabs-folder-path set  (persisted from a previous session where it WAS loaded)
+   *   - zentabs-pending-url set  (set when the tab was created by syncFromBookmarks)
+   */
+  function makeInactiveTab(url, folder, spaceUuid) {
+    return makeTab({
+      pinned: true,
+      url: "about:blank",
+      attrs: {
+        "zen-workspace-id":   spaceUuid,
+        "zentabs-pending-url": url,
+        "zentabs-folder-path": folder,
+      },
+    });
+  }
+
+  test("syncBidirectional step 2: does NOT delete bookmarks when all space tabs are invisible", async () => {
+    // NIQ space: manifest records 2 tabs, but both return about:blank
+    // (inactive space — they haven't loaded yet).
+    // Before fix: step 2 would delete both bookmarks.
+    const ws = makeWorkspace("NIQ", "uuid-niq");
+    const tab1 = makeInactiveTab("https://admin.niq.com", "Administrative", ws.uuid);
+    const tab2 = makeInactiveTab("https://tools.niq.com", "Tools",          ws.uuid);
+
+    const mgr = makeManager({ workspaces: [ws], tabs: [tab1, tab2] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://admin.niq.com", "Admin", "Administrative");
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://tools.niq.com", "Tools", "Tools");
+
+    const sync = new SyncManager(mgr);
+    sync.saveManifest(new Map([[ws.uuid, [
+      { url: "https://admin.niq.com", folder: "Administrative", type: "pinned" },
+      { url: "https://tools.niq.com", folder: "Tools",          type: "pinned" },
+    ]]]));
+
+    // Provide a tabManager that returns the about:blank tabs with correct
+    // folder info (from zentabs-folder-path) and pendingUrl
+    mgr.tabManager = {
+      getAllTabs: async () => [
+        {
+          url: "about:blank",
+          title: "Admin",
+          type: "pinned",
+          workspace: { id: ws.uuid, name: ws.name },
+          folderPath: ["Administrative"],
+          tab: tab1,
+        },
+        {
+          url: "about:blank",
+          title: "Tools",
+          type: "pinned",
+          workspace: { id: ws.uuid, name: ws.name },
+          folderPath: ["Tools"],
+          tab: tab2,
+        },
+      ],
+      rebuildCache: async () => {},
+    };
+
+    const result = await sync.syncBidirectional();
+
+    // Guard should have prevented deletion
+    assert.equal(result.bookmarksDeleted, 0,
+      "step 2 must not delete bookmarks when all space tabs are invisible (about:blank)");
+    // Bookmarks should still exist
+    const bm1 = await mgr.window.PlacesUtils.bookmarks.search({ url: "https://admin.niq.com" });
+    const bm2 = await mgr.window.PlacesUtils.bookmarks.search({ url: "https://tools.niq.com" });
+    assert.equal(bm1.length, 1, "admin bookmark must not have been deleted");
+    assert.equal(bm2.length, 1, "tools bookmark must not have been deleted");
+    // And no new tabs should have been opened (manifest matches bookmark counts)
+    assert.equal(result.tabsOpened, 0, "no duplicate tabs should be opened");
+  });
+
+  test("syncBidirectional step 2: still deletes bookmarks when space truly has no tabs", async () => {
+    // Space has 0 raw tabs (user actually closed them all) — deletion is correct.
+    const ws = makeWorkspace("Work", "uuid-work");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://closed.work.com", "Closed", "");
+
+    const sync = new SyncManager(mgr);
+    sync.saveManifest(new Map([[ws.uuid, [
+      { url: "https://closed.work.com", folder: "", type: "pinned" },
+    ]]]));
+    mgr.tabManager = {
+      getAllTabs: async () => [],
+      rebuildCache: async () => {},
+    };
+
+    const result = await sync.syncBidirectional();
+    assert.equal(result.bookmarksDeleted, 1, "bookmark must be deleted when space has 0 tabs");
+  });
+
+  test("_openOrMatchTab sets zentabs-folder-path on newly created tabs", async () => {
+    const ws = makeWorkspace("NIQ", "uuid-niq");
+    const mgr = makeManager({ workspaces: [ws], tabs: [] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://tools.niq.com", "Tools", "Tools");
+
+    const sync = new SyncManager(mgr);
+    mgr.tabManager = {
+      getAllTabs: async () => [],
+      rebuildCache: async () => {},
+    };
+    // Use syncFromBookmarks which calls _openOrMatchTab internally
+    await sync.syncFromBookmarks();
+
+    const createdTab = mgr.window.gBrowser.tabs.find(
+      t => t.getAttribute("zentabs-pending-url") === "https://tools.niq.com"
+    );
+    assert.ok(createdTab, "tab must be created for the bookmark");
+    assert.equal(
+      createdTab.getAttribute("zentabs-folder-path"), "Tools",
+      "zentabs-folder-path must be set on the new tab so future inactive-space syncs match correctly"
+    );
+  });
+
+  test("getFolderPath: uses zentabs-folder-path attribute when tab.group is null after restart", async () => {
+    // Regression: after restart, tab.group = null for inactive tabs but
+    // zentabs-folder-path was persisted → should return the correct folder.
+    const ws = makeWorkspace("NIQ", "uuid-niq");
+    const tab = makeTab({
+      pinned: true,
+      url: "about:blank",
+      attrs: {
+        "zen-workspace-id":     ws.uuid,
+        "zentabs-pending-url":  "https://tools.niq.com",
+        "zentabs-folder-path":  "Tools",
+      },
+    });
+    const mgr = makeManager({ workspaces: [ws], tabs: [tab] });
+    await seedBookmark(mgr.window.PlacesUtils, ws.name, "https://tools.niq.com", "Tools", "Tools");
+
+    const sync = new SyncManager(mgr);
+    sync.saveManifest(new Map([[ws.uuid, [
+      { url: "https://tools.niq.com", folder: "Tools", type: "pinned" },
+    ]]]));
+    mgr.tabManager = {
+      getAllTabs: async () => [{
+        url: "about:blank",
+        title: "Tools",
+        type: "pinned",
+        workspace: { id: ws.uuid, name: ws.name },
+        folderPath: ["Tools"],  // correctly resolved via zentabs-folder-path attribute
+        tab,
+      }],
+      rebuildCache: async () => {},
+    };
+
+    const result = await sync.syncBidirectional();
+    assert.equal(result.tabsOpened, 0,
+      "no duplicate tab should be opened when folder path is correctly resolved from attribute");
+    assert.equal(result.bookmarksDeleted, 0,
+      "no bookmark should be deleted when tab is just unloaded, not genuinely closed");
+  });
+});

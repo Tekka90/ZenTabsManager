@@ -493,4 +493,100 @@ describe("URL extraction (_extractTabUrl)", () => {
     const tm = new TabManager(mgr);
     assert.equal(tm._extractTabUrl(tab), "https://original-essential.com");
   });
+
+  test("lazy tab in inactive space: returns URL from __SS_data when currentURI is about:blank", () => {
+    // Simulates a pinned tab in an inactive Zen space (not yet loaded).
+    // Firefox sets __SS_data on the browser element for pending/lazy tabs.
+    const tab = makeTab({
+      pinned: true,
+      url: "about:blank",  // not yet loaded
+      __SS_data: { entries: [{ url: "https://admin.example.com" }] },
+    });
+    const mgr = makeManager();
+    const tm = new TabManager(mgr);
+    assert.equal(tm._extractTabUrl(tab), "https://admin.example.com");
+  });
+
+  test("__SS_data: skips about: entries and falls through", () => {
+    const tab = makeTab({
+      url: "about:blank",
+      __SS_data: { entries: [{ url: "about:newtab" }] },
+    });
+    const mgr = makeManager();
+    const tm = new TabManager(mgr);
+    // about:newtab should be skipped; falls through to returning about:blank
+    assert.equal(tm._extractTabUrl(tab), "about:blank");
+  });
+
+  test("__SS_data: supports tabData.entries format", () => {
+    const tab = makeTab({
+      url: "about:blank",
+      __SS_data: { tabData: { entries: [{ url: "https://tabdata.example.com" }] } },
+    });
+    const mgr = makeManager();
+    const tm = new TabManager(mgr);
+    assert.equal(tm._extractTabUrl(tab), "https://tabdata.example.com");
+  });
+});
+
+// ── getFolderPath: persistent attribute fallback ──────────────────────────
+
+describe("getFolderPath — persistent zentabs-folder-path attribute", () => {
+  test("saves path to zentabs-folder-path attribute when tab.group is set", () => {
+    const group = { isZenFolder: true, label: "Projects", group: null };
+    const tab = makeTab({ group });
+    const mgr = makeManager();
+    const tm = new TabManager(mgr);
+    const path = tm.getFolderPath(tab);
+    assert.deepEqual(path, ["Projects"]);
+    assert.equal(tab.getAttribute("zentabs-folder-path"), "Projects");
+  });
+
+  test("saves nested path as slash-separated to zentabs-folder-path attribute", () => {
+    const inner = { isZenFolder: true, label: "React", group: null };
+    const outer = { isZenFolder: true, label: "Projects", group: inner };
+    // Note: current tab belongs to inner, and inner's parent is outer
+    const tab = makeTab({ group: inner });
+    // Simulate two-level nesting: inner.group = outer for upward traversal
+    inner.group = outer;
+    outer.group = null;
+    const mgr = makeManager();
+    const tm = new TabManager(mgr);
+    const path = tm.getFolderPath(tab);
+    assert.deepEqual(path, ["Projects", "React"]);
+    assert.equal(tab.getAttribute("zentabs-folder-path"), "Projects/React");
+  });
+
+  test("falls back to zentabs-folder-path attribute when tab.group is null", () => {
+    // Mirrors inactive-space scenario: group is gone but attribute was saved
+    const tab = makeTab({ group: null, attrs: { "zentabs-folder-path": "Administrative" } });
+    const mgr = makeManager();
+    const tm = new TabManager(mgr);
+    const path = tm.getFolderPath(tab);
+    assert.deepEqual(path, ["Administrative"]);
+  });
+
+  test("returns null when group is null and attribute is absent", () => {
+    const tab = makeTab({ group: null });
+    const mgr = makeManager();
+    const tm = new TabManager(mgr);
+    assert.equal(tm.getFolderPath(tab), null);
+  });
+
+  test("regression: pinned tab in inactive space retains correct folder after restart", () => {
+    // Scenario:
+    //   1. Tab was correctly assigned to group "Tools/Books"
+    //   2. getFolderPath persisted "Tools/Books" via zentabs-folder-path
+    //   3. Browser restarted; tab.group is now null (inactive space)
+    //   4. getFolderPath should return ["Tools","Books"] from the attribute
+    const tab = makeTab({
+      pinned: true,
+      url: "about:blank",
+      attrs: { "zentabs-folder-path": "Tools/Books", "zen-workspace-id": "uuid-niq" },
+    });
+    const mgr = makeManager();
+    const tm = new TabManager(mgr);
+    const path = tm.getFolderPath(tab);
+    assert.deepEqual(path, ["Tools", "Books"]);
+  });
 });
