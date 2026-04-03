@@ -569,6 +569,214 @@ describe("syncBidirectional — subsequent syncs (non-empty manifest)", () => {
   });
 });
 
+// ── Folder move regression ────────────────────────────────────────────────
+
+describe("syncBidirectional — Zen folder moved to new position", () => {
+  /**
+   * User scenario:
+   *   - Space NIQ has folders A, B (with B1, B2 inside), C
+   *   - Everything was in sync: manifest = tabs = bookmarks at "B/B2"
+   *   - User moves folder B2 out of B to the root level
+   *   - Tabs now show folder path ["B2"] for the moved tabs
+   *   - Next sync should: CREATE bookmarks at "B2" root AND DELETE old bookmarks at "B/B2"
+   *
+   * Bug (before fix): new bookmarks were created at "B2" root (step 1 ✓) but
+   * old bookmarks at "B/B2" were NOT deleted (step 2 ✗), leaving duplicates.
+   */
+  test("moved folder: new location bookmarks created AND old location bookmarks deleted", async () => {
+    const ws = makeWorkspace("NIQ", "uuid-niq");
+    const mgr = makeManager({ workspaces: [ws] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    // Seed the OLD bookmark location: Zen/NIQ/B/B2/page1.com
+    // We simulate "B/B2" as a flat sub-folder titled "B/B2" directly under
+    // the NIQ space folder — getAllBookmarksInFolder returns folder="B/B2"
+    // for both this flat representation and a true nested B>B2 structure.
+    const { bmGuid } = await seedBookmark(PlacesUtils, ws.name, "https://page1.example.com", "Page 1", "B/B2");
+
+    const sync = new SyncManager(mgr);
+
+    // Manifest from the last sync (when B2 was still inside B)
+    sync.saveManifest(new Map([[ws.uuid, [
+      { url: "https://page1.example.com", folder: "B/B2", type: "pinned" },
+    ]]]));
+
+    // After the user moved B2 to root, the tab now reports folderPath: ["B2"]
+    mgr.tabManager = {
+      getAllTabs: async () => [{
+        url: "https://page1.example.com",
+        title: "Page 1",
+        type: "pinned",
+        workspace: { id: ws.uuid, name: ws.name },
+        folderPath: ["B2"],   // ← new position: top-level folder "B2"
+        tab: makeTab({ url: "https://page1.example.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } }),
+      }],
+      rebuildCache: async () => {},
+    };
+
+    const result = await sync.syncBidirectional();
+
+    // Step 1 must have created the new bookmark at the new location
+    assert.equal(result.bookmarksCreated, 1, "should create 1 bookmark at new B2 root location");
+    // Step 2 must have deleted the old bookmark at the old location
+    assert.equal(result.bookmarksDeleted, 1, "should delete the 1 stale bookmark at old B/B2 location");
+
+    // Only ONE bookmark for this URL should exist (the one at B2 root)
+    const bms = await PlacesUtils.bookmarks.search({ url: "https://page1.example.com" });
+    assert.equal(bms.length, 1, "exactly 1 bookmark should exist after folder move sync");
+
+    // Manifest must be updated to reflect the new location
+    const manifest = sync.loadManifest();
+    const entries = manifest.get(ws.uuid) ?? [];
+    assert.equal(entries.length, 1, "manifest should have exactly 1 entry");
+    assert.equal(entries[0].url, "https://page1.example.com");
+    assert.equal(entries[0].folder, "B2", "manifest folder should reflect new B2 root location");
+  });
+
+  test("moved folder with multiple tabs: ALL old bookmarks deleted, ALL new ones created", async () => {
+    const ws = makeWorkspace("NIQ", "uuid-niq");
+    const mgr = makeManager({ workspaces: [ws] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    // Seed 3 bookmarks in the old location (B/B2)
+    await seedBookmark(PlacesUtils, ws.name, "https://a.example.com", "A", "B/B2");
+    await seedBookmark(PlacesUtils, ws.name, "https://b.example.com", "B", "B/B2");
+    await seedBookmark(PlacesUtils, ws.name, "https://c.example.com", "C", "B/B2");
+
+    const sync = new SyncManager(mgr);
+    sync.saveManifest(new Map([[ws.uuid, [
+      { url: "https://a.example.com", folder: "B/B2", type: "pinned" },
+      { url: "https://b.example.com", folder: "B/B2", type: "pinned" },
+      { url: "https://c.example.com", folder: "B/B2", type: "pinned" },
+    ]]]));
+
+    // All 3 tabs are now at root-level B2
+    mgr.tabManager = {
+      getAllTabs: async () => [
+        { url: "https://a.example.com", title: "A", type: "pinned",
+          workspace: { id: ws.uuid, name: ws.name }, folderPath: ["B2"],
+          tab: makeTab({ url: "https://a.example.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } }) },
+        { url: "https://b.example.com", title: "B", type: "pinned",
+          workspace: { id: ws.uuid, name: ws.name }, folderPath: ["B2"],
+          tab: makeTab({ url: "https://b.example.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } }) },
+        { url: "https://c.example.com", title: "C", type: "pinned",
+          workspace: { id: ws.uuid, name: ws.name }, folderPath: ["B2"],
+          tab: makeTab({ url: "https://c.example.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } }) },
+      ],
+      rebuildCache: async () => {},
+    };
+
+    const result = await sync.syncBidirectional();
+
+    assert.equal(result.bookmarksCreated, 3, "should create 3 bookmarks at new B2 root");
+    assert.equal(result.bookmarksDeleted, 3, "should delete 3 stale bookmarks from old B/B2");
+
+    // After sync: 3 bookmarks exist (at new location), 0 at old location
+    const allBms = await PlacesUtils.bookmarks.search({ url: "https://a.example.com" });
+    assert.equal(allBms.length, 1, "exactly 1 bookmark for a.example.com");
+  });
+
+  test("folder moved from deep nesting to shallower: old deep bookmarks deleted", async () => {
+    const ws = makeWorkspace("NIQ", "uuid-niq");
+    const mgr = makeManager({ workspaces: [ws] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    // Old location: A/SubA (two-level nested)
+    await seedBookmark(PlacesUtils, ws.name, "https://deep.example.com", "Deep", "A/SubA");
+
+    const sync = new SyncManager(mgr);
+    sync.saveManifest(new Map([[ws.uuid, [
+      { url: "https://deep.example.com", folder: "A/SubA", type: "pinned" },
+    ]]]));
+
+    // SubA folder moved to root (now just "SubA", no longer under A)
+    mgr.tabManager = {
+      getAllTabs: async () => [{
+        url: "https://deep.example.com", title: "Deep", type: "pinned",
+        workspace: { id: ws.uuid, name: ws.name }, folderPath: ["SubA"],
+        tab: makeTab({ url: "https://deep.example.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } }),
+      }],
+      rebuildCache: async () => {},
+    };
+
+    const result = await sync.syncBidirectional();
+
+    assert.equal(result.bookmarksCreated, 1, "1 bookmark at new shallow location");
+    assert.equal(result.bookmarksDeleted, 1, "1 stale bookmark at old deep location removed");
+  });
+
+  test("folder moved + second sync: no duplicate tabs opened", async () => {
+    // Validates that after a successful folder-move sync, the NEXT sync
+    // does not treat the old (now-gone) bookmark location as a "new remote add"
+    // and erroneously open extra tabs.
+    const ws = makeWorkspace("NIQ", "uuid-niq");
+    const mgr = makeManager({ workspaces: [ws] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    await seedBookmark(PlacesUtils, ws.name, "https://moved.example.com", "Moved", "B/B2");
+
+    const sync = new SyncManager(mgr);
+    sync.saveManifest(new Map([[ws.uuid, [
+      { url: "https://moved.example.com", folder: "B/B2", type: "pinned" },
+    ]]]));
+
+    const tabData = {
+      url: "https://moved.example.com", title: "Moved", type: "pinned",
+      workspace: { id: ws.uuid, name: ws.name }, folderPath: ["B2"],
+      tab: makeTab({ url: "https://moved.example.com", pinned: true, attrs: { "zen-workspace-id": ws.uuid } }),
+    };
+    mgr.tabManager = { getAllTabs: async () => [tabData], rebuildCache: async () => {} };
+
+    // First sync: folder move handled
+    const r1 = await sync.syncBidirectional();
+    assert.equal(r1.bookmarksCreated, 1);
+    assert.equal(r1.bookmarksDeleted, 1);
+
+    // Second sync: state is stable — no new tabs, no new bookmarks, no deletions
+    const tabsBeforeSecondSync = mgr.window.gBrowser.tabs.length;
+    const r2 = await sync.syncBidirectional();
+    assert.equal(r2.bookmarksCreated, 0, "second sync: no new bookmarks");
+    assert.equal(r2.bookmarksDeleted, 0, "second sync: no bookmark deletions");
+    assert.equal(r2.tabsOpened, 0, "second sync: no new tabs opened");
+    assert.equal(mgr.window.gBrowser.tabs.length, tabsBeforeSecondSync,
+      "second sync: tab count unchanged (no duplicate opening)");
+  });
+
+  test("syncToBookmarks also handles folder move: old bookmark deleted", async () => {
+    // syncToBookmarks is 'tabs are authority': any orphan bookmark (one that
+    // has no matching tab at its folder location) should be deleted.
+    // After a folder move, the old bookmark at B/B2 is an orphan.
+    const ws = makeWorkspace("NIQ", "uuid-niq");
+    const tab = makeTab({ url: "https://moved.example.com", pinned: true,
+      attrs: { "zen-workspace-id": ws.uuid, "zentabs-folder-path": "B2" } });
+    const mgr = makeManager({ workspaces: [ws], tabs: [tab] });
+    const PlacesUtils = mgr.window.PlacesUtils;
+
+    await seedBookmark(PlacesUtils, ws.name, "https://moved.example.com", "Moved", "B/B2");
+
+    const sync = new SyncManager(mgr);
+
+    mgr.tabManager = {
+      getAllTabs: async () => [{
+        url: "https://moved.example.com", title: "Moved", type: "pinned",
+        workspace: { id: ws.uuid, name: ws.name }, folderPath: ["B2"],
+        tab,
+      }],
+      rebuildCache: async () => {},
+    };
+
+    const result = await sync.syncToBookmarks();
+
+    // The orphan at B/B2 should be removed
+    assert.equal(result.bookmarksDeleted, 1, "old B/B2 bookmark should be deleted");
+    // A new bookmark at B2 should be created
+    assert.equal(result.bookmarksCreated, 1, "new B2 bookmark should be created");
+
+    const bms = await PlacesUtils.bookmarks.search({ url: "https://moved.example.com" });
+    assert.equal(bms.length, 1, "exactly 1 bookmark should remain");
+  });
+});
+
 // ── syncToBookmarks (tabs-are-authority) ──────────────────────────────────
 
 describe("syncToBookmarks — tabs are authority", () => {

@@ -223,6 +223,28 @@ export class TabManager {
       return path;
     }
 
+    // tab.group is null: either the space is active and the tab is genuinely
+    // at the root level, OR the space is inactive and Zen has detached the
+    // tab container from the DOM.
+    //
+    // If the space IS active we have an authoritative answer: the tab is at
+    // the root (e.g. the user just moved it out of a folder). Clear any stale
+    // cached attribute so the sync treats it as "no folder" rather than
+    // returning the old, now-incorrect path.
+    //
+    // If the space is inactive we cannot tell, so we fall back to the cached
+    // attribute as before.
+    const spaceUuid = tab.getAttribute?.("zen-workspace-id");
+    const gZenWorkspaces = this.manager.window.gZenWorkspaces;
+    if (gZenWorkspaces && spaceUuid) {
+      const ws = gZenWorkspaces.getWorkspaceFromId?.(spaceUuid);
+      if (ws && gZenWorkspaces.isWorkspaceActive?.(ws)) {
+        // Space is active — tab.group is the ground truth. Tab is at root.
+        tab.removeAttribute?.("zentabs-folder-path");
+        return null;
+      }
+    }
+
     // Fallback: use the previously cached attribute.
     // Only non-empty values are stored, so an attribute value of "" never
     // appears here — returning null for genuinely root-level pinned tabs.

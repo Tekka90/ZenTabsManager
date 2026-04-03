@@ -206,11 +206,14 @@ export function makeGZenWorkspaces(workspaces = [], allTabs = []) {
   let _counter = 1;
   let _activeUuid = workspaces[0]?.uuid ?? null;
   let _switchCount = 0;
-  return {
+  const obj = {
     getWorkspaces: ()           => workspaces,
     getWorkspaceFromId: (uuid)  => byUuid.get(uuid) ?? null,
     isWorkspaceActive: (ws)     => ws.uuid === _activeUuid,
     get activeWorkspace()       { return _activeUuid; },
+    // Allow tests to set the active uuid directly without async changeWorkspaceWithID
+    set _activeUuid(uuid)       { _activeUuid = uuid; },
+    get _activeUuid()           { return _activeUuid; },
     get allStoredTabs()         { return allTabs; },
     get switchCount()           { return _switchCount; },
     async changeWorkspaceWithID(uuid) {
@@ -230,6 +233,7 @@ export function makeGZenWorkspaces(workspaces = [], allTabs = []) {
       if (existing) Object.assign(existing, workspaceData);
     },
   };
+  return obj;
 }
 
 // ── Zen Folders (gZenFolders) ───────────────────────────────────────────

@@ -557,10 +557,16 @@ describe("getFolderPath — persistent zentabs-folder-path attribute", () => {
     assert.equal(tab.getAttribute("zentabs-folder-path"), "Projects/React");
   });
 
-  test("falls back to zentabs-folder-path attribute when tab.group is null", () => {
-    // Mirrors inactive-space scenario: group is gone but attribute was saved
-    const tab = makeTab({ group: null, attrs: { "zentabs-folder-path": "Administrative" } });
-    const mgr = makeManager();
+  test("falls back to zentabs-folder-path attribute when tab.group is null and space is inactive", () => {
+    // Mirrors inactive-space scenario: group is gone but attribute was saved.
+    // gZenWorkspaces reports the space as NOT active → we trust the cached attribute.
+    const ws = { uuid: "uuid-inactive", name: "Work", icon: null, theme: {}, containerTabId: 0 };
+    const tab = makeTab({ group: null, attrs: { "zentabs-folder-path": "Administrative", "zen-workspace-id": ws.uuid } });
+    // Active workspace is different → the tab's space is inactive
+    const wsActive = { uuid: "uuid-active", name: "Personal", icon: null, theme: {}, containerTabId: 0 };
+    const mgr = makeManager({ workspaces: [ws, wsActive] });
+    // Force the active workspace to be "Personal", not "Work"
+    mgr.window.gZenWorkspaces._activeUuid = wsActive.uuid;
     const tm = new TabManager(mgr);
     const path = tm.getFolderPath(tab);
     assert.deepEqual(path, ["Administrative"]);
@@ -588,5 +594,51 @@ describe("getFolderPath — persistent zentabs-folder-path attribute", () => {
     const tm = new TabManager(mgr);
     const path = tm.getFolderPath(tab);
     assert.deepEqual(path, ["Tools", "Books"]);
+  });
+
+  test("regression: folder move — stale attribute cleared when space is active and tab.group is null", () => {
+    // User moved a tab out of folder "B/B2" to the root of the active space.
+    // tab.group is now null (root level) but zentabs-folder-path still says "B/B2".
+    // getFolderPath must return null (root) and clear the stale attribute.
+    const ws = { uuid: "uuid-niq", name: "NIQ", icon: null, theme: {}, containerTabId: 0 };
+    const tab = makeTab({
+      group: null,
+      attrs: { "zentabs-folder-path": "B/B2", "zen-workspace-id": ws.uuid },
+    });
+    const mgr = makeManager({ workspaces: [ws] });
+    // The NIQ space IS the active workspace
+    mgr.window.gZenWorkspaces._activeUuid = ws.uuid;
+    const tm = new TabManager(mgr);
+
+    const path = tm.getFolderPath(tab);
+
+    assert.equal(path, null, "should return null — tab is at root of active space");
+    assert.equal(tab.getAttribute("zentabs-folder-path"), null,
+      "stale zentabs-folder-path attribute should be cleared");
+  });
+
+  test("regression: folder move — sync sees correct (root) location, not stale", async () => {
+    // Full integration: TabManager.getFolderPath is called during rebuildCache.
+    // The tab has a stale "zentabs-folder-path" attribute saying B/B2, but it
+    // was moved to the root of the active workspace.
+    // After rebuildCache, getAllTabs() must report folderPath=null for this tab.
+    const ws = { uuid: "uuid-niq", name: "NIQ", icon: null, theme: {}, containerTabId: 0 };
+    const tab = makeTab({
+      pinned: true,
+      url: "https://example.com",
+      group: null,  // moved to root; no Zen folder
+      attrs: { "zentabs-folder-path": "B/B2", "zen-workspace-id": ws.uuid },
+    });
+    const mgr = makeManager({ workspaces: [ws], tabs: [tab] });
+    // Active workspace is NIQ
+    mgr.window.gZenWorkspaces._activeUuid = ws.uuid;
+
+    const tm = new TabManager(mgr);
+    await tm.rebuildCache();
+    const tabs = await tm.getAllTabs();
+
+    assert.equal(tabs.length, 1);
+    assert.equal(tabs[0].folderPath, null,
+      "folderPath must be null (root) — not the stale B/B2");
   });
 });
