@@ -832,7 +832,10 @@ export class SimpleBookmarkSyncManager {
       const spaceMetadata = await this.readSpaceMetadata();
 
       // 3. Parse the bookmark tree into structured space descriptors.
-      const spaceFolders = await this._parseBookmarkTree(zenTabsEntry.guid);
+      //    zenTabsEntry already contains the full recursive tree from
+      //    promiseBookmarksTree — traverse it directly rather than
+      //    re-fetching each sub-folder (which can lose children).
+      const spaceFolders = this._parseBookmarkTree(zenTabsEntry);
 
       // 4. Find or create each Zen Space.
       const spaceMap = new Map(); // spaceName → workspace object
@@ -904,6 +907,11 @@ export class SimpleBookmarkSyncManager {
    * Parse the ZenTabs/ bookmark tree into an array of space folder descriptors.
    * This is a pure read-only method — no browser state is modified.
    *
+   * Accepts the ZenTabs/ tree node directly (from promiseBookmarksTree) and
+   * traverses its already-populated recursive children.  This avoids redundant
+   * promiseBookmarksTree calls, which in the real browser can return folder
+   * nodes without children populated.
+   *
    * Each descriptor:
    *   { name: string,
    *     essentials: [{ containerName: string, items: [{title, url}] }],
@@ -913,34 +921,29 @@ export class SimpleBookmarkSyncManager {
    *   { type: "bookmark", title, url }            ← root-level pinned tab
    *   { type: "folder",   title, children: [...] } ← Zen folder (pinned tabs)
    */
-  async _parseBookmarkTree(zenTabsGuid) {
-    const PlacesUtils = this.manager.window.PlacesUtils;
-    const tree = await PlacesUtils.promiseBookmarksTree(zenTabsGuid);
+  _parseBookmarkTree(zenTabsNode) {
     const spaceFolders = [];
 
-    for (const child of tree?.children ?? []) {
+    for (const child of zenTabsNode?.children ?? []) {
       if (child.uri != null) continue;           // bare bookmarks at root — skip
       if (child.title === "__spaces__") continue; // metadata folder — skip
 
       const sf = { name: child.title, essentials: [], pinned: [] };
-      const spaceTree = await PlacesUtils.promiseBookmarksTree(child.guid);
 
-      for (const item of spaceTree?.children ?? []) {
+      for (const item of child?.children ?? []) {
         if (item.uri != null) {
           // Direct bookmark inside the space folder → root-level pinned tab.
           sf.pinned.push({ type: "bookmark", title: item.title, url: item.uri });
         } else if (this._isEssentialsFolder(item.title)) {
           // Essentials sub-folder.
-          const efTree = await PlacesUtils.promiseBookmarksTree(item.guid);
-          const items = (efTree?.children ?? [])
+          const items = (item?.children ?? [])
             .filter(c => c.uri != null)
             .map(c => ({ title: c.title, url: c.uri }));
           sf.essentials.push({ containerName: item.title, items });
         } else {
           // Named subfolder → Zen folder wrapping pinned tabs.
-          const sfTree = await PlacesUtils.promiseBookmarksTree(item.guid);
           const folderNode = { type: "folder", title: item.title, children: [] };
-          for (const bm of sfTree?.children ?? []) {
+          for (const bm of item?.children ?? []) {
             if (bm.uri != null) {
               folderNode.children.push({ type: "bookmark", title: bm.title, url: bm.uri });
             }

@@ -874,10 +874,16 @@ function makeSyncManagerForParseTree() {
   return { sm: new SimpleBookmarkSyncManager(mgr), zenTabsGuid: "zt" };
 }
 
+/** Helper: get the ZenTabs tree node for _parseBookmarkTree tests. */
+async function getZenTabsNode(sm, guid) {
+  return sm.manager.window.PlacesUtils.promiseBookmarksTree(guid);
+}
+
 describe("_parseBookmarkTree", () => {
   test("returns one space descriptor per top-level folder (skipping __spaces__)", async () => {
     const { sm, zenTabsGuid } = makeSyncManagerForParseTree();
-    const spaces = await sm._parseBookmarkTree(zenTabsGuid);
+    const node = await getZenTabsNode(sm, zenTabsGuid);
+    const spaces = sm._parseBookmarkTree(node);
     assert.equal(spaces.length, 1);
     assert.equal(spaces[0].name, "Work");
   });
@@ -886,13 +892,15 @@ describe("_parseBookmarkTree", () => {
     const { sm, zenTabsGuid } = makeSyncManagerForParseTree();
     const store = sm.manager.window.PlacesUtils.bookmarks._store;
     store.set("meta", { guid: "meta", parentGuid: "zt", type: "folder", title: "__spaces__", url: null });
-    const spaces = await sm._parseBookmarkTree(zenTabsGuid);
+    const node = await getZenTabsNode(sm, zenTabsGuid);
+    const spaces = sm._parseBookmarkTree(node);
     assert.ok(!spaces.find(s => s.name === "__spaces__"), "__spaces__ must be excluded");
   });
 
   test("essentials folder is parsed correctly", async () => {
     const { sm, zenTabsGuid } = makeSyncManagerForParseTree();
-    const spaces = await sm._parseBookmarkTree(zenTabsGuid);
+    const node = await getZenTabsNode(sm, zenTabsGuid);
+    const spaces = sm._parseBookmarkTree(node);
     const work = spaces[0];
     assert.equal(work.essentials.length, 1);
     assert.equal(work.essentials[0].containerName, "Essentials");
@@ -903,7 +911,8 @@ describe("_parseBookmarkTree", () => {
 
   test("direct bookmark in space folder → root-level pinned", async () => {
     const { sm, zenTabsGuid } = makeSyncManagerForParseTree();
-    const spaces = await sm._parseBookmarkTree(zenTabsGuid);
+    const node = await getZenTabsNode(sm, zenTabsGuid);
+    const spaces = sm._parseBookmarkTree(node);
     const work = spaces[0];
     const rootPinned = work.pinned.filter(i => i.type === "bookmark");
     assert.equal(rootPinned.length, 1);
@@ -913,7 +922,8 @@ describe("_parseBookmarkTree", () => {
 
   test("named subfolder → Zen folder descriptor", async () => {
     const { sm, zenTabsGuid } = makeSyncManagerForParseTree();
-    const spaces = await sm._parseBookmarkTree(zenTabsGuid);
+    const node = await getZenTabsNode(sm, zenTabsGuid);
+    const spaces = sm._parseBookmarkTree(node);
     const work = spaces[0];
     const folders = work.pinned.filter(i => i.type === "folder");
     assert.equal(folders.length, 1);
@@ -928,7 +938,8 @@ describe("_parseBookmarkTree", () => {
     store.clear();
     store.set("zt-empty", { guid: "zt-empty", parentGuid: null, type: "folder", title: "ZenTabs", url: null });
     const sm = new SimpleBookmarkSyncManager(mgr);
-    const spaces = await sm._parseBookmarkTree("zt-empty");
+    const node = await getZenTabsNode(sm, "zt-empty");
+    const spaces = sm._parseBookmarkTree(node);
     assert.deepEqual(spaces, []);
   });
 });
