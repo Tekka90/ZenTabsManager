@@ -942,6 +942,59 @@ describe("_parseBookmarkTree", () => {
     const spaces = sm._parseBookmarkTree(node);
     assert.deepEqual(spaces, []);
   });
+
+  test("nested sub-folders are extracted as independent folder entries", async () => {
+    const mgr = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    store.set("zt",           { guid: "zt",           parentGuid: null,          type: "folder",   title: "ZenTabs", url: null });
+    store.set("ws-work",      { guid: "ws-work",      parentGuid: "zt",          type: "folder",   title: "Work",    url: null });
+    store.set("folder-outer", { guid: "folder-outer",  parentGuid: "ws-work",     type: "folder",   title: "Outer",   url: null });
+    store.set("bm-a",         { guid: "bm-a",          parentGuid: "folder-outer", type: "bookmark", title: "A",       url: "https://a.com" });
+    store.set("folder-inner", { guid: "folder-inner",  parentGuid: "folder-outer", type: "folder",   title: "Inner",   url: null });
+    store.set("bm-b",         { guid: "bm-b",          parentGuid: "folder-inner", type: "bookmark", title: "B",       url: "https://b.com" });
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const node = await getZenTabsNode(sm, "zt");
+    const spaces = sm._parseBookmarkTree(node);
+    const work = spaces[0];
+
+    const folders = work.pinned.filter(i => i.type === "folder");
+    assert.equal(folders.length, 2, "Outer + Inner should be two separate folder entries");
+
+    const inner = folders.find(f => f.title === "Inner");
+    assert.ok(inner, "Inner folder should exist as a top-level entry");
+    assert.equal(inner.children.length, 1);
+    assert.equal(inner.children[0].url, "https://b.com");
+
+    const outer = folders.find(f => f.title === "Outer");
+    assert.ok(outer, "Outer folder should exist as a top-level entry");
+    assert.equal(outer.children.length, 1);
+    assert.equal(outer.children[0].url, "https://a.com");
+  });
+
+  test("deeply nested bookmarks at 3+ levels are all collected", async () => {
+    const mgr = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    store.set("zt",     { guid: "zt",     parentGuid: null,   type: "folder",   title: "ZenTabs",  url: null });
+    store.set("ws",     { guid: "ws",     parentGuid: "zt",   type: "folder",   title: "Space",    url: null });
+    store.set("f-a",    { guid: "f-a",    parentGuid: "ws",   type: "folder",   title: "A",        url: null });
+    store.set("f-b",    { guid: "f-b",    parentGuid: "f-a",  type: "folder",   title: "B",        url: null });
+    store.set("f-c",    { guid: "f-c",    parentGuid: "f-b",  type: "folder",   title: "C",        url: null });
+    store.set("bm-deep",{ guid: "bm-deep",parentGuid: "f-c",  type: "bookmark", title: "Deep",     url: "https://deep.com" });
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const node = await getZenTabsNode(sm, "zt");
+    const spaces = sm._parseBookmarkTree(node);
+    const folders = spaces[0].pinned.filter(i => i.type === "folder");
+
+    assert.equal(folders.length, 3, "A, B, C should all be extracted");
+    const c = folders.find(f => f.title === "C");
+    assert.ok(c);
+    assert.equal(c.children.length, 1);
+    assert.equal(c.children[0].url, "https://deep.com");
+  });
 });
 
 // ── _resolveContainerName ────────────────────────────────────────────────

@@ -835,37 +835,7 @@ export class SimpleBookmarkSyncManager {
       //    Fetch the ZenTabs tree by its own GUID.
       const zenTabsTree = await PlacesUtils.promiseBookmarksTree(zenTabsEntry.guid);
 
-      // ── DEBUG: dump tree shape so we can diagnose parse issues ──────
-      const _dumpNode = (n, depth = 0) => {
-        const indent = "  ".repeat(depth);
-        const kids = n?.children?.length ?? 0;
-        const hasUri = n?.uri != null;
-        this.log(`${indent}[${hasUri ? "BM" : "DIR"}] "${n?.title}" guid=${n?.guid} uri=${hasUri ? n.uri.substring(0, 60) : "—"} children=${kids}`);
-        if (kids > 0 && depth < 3) {
-          for (const c of n.children) _dumpNode(c, depth + 1);
-        }
-      };
-      this.log("── zenTabsTree dump (depth ≤ 3) ──");
-      _dumpNode(zenTabsTree);
-      // ── END DEBUG ──────────────────────────────────────────────────
-
       const spaceFolders = this._parseBookmarkTree(zenTabsTree);
-
-      // ── DEBUG: dump parsed result ──────────────────────────────────
-      for (const sf of spaceFolders) {
-        this.log(`Space "${sf.name}": essentials=${sf.essentials.length} groups, pinned=${sf.pinned.length} items`);
-        for (const ef of sf.essentials) {
-          this.log(`  Essentials "${ef.containerName}": ${ef.items.length} items`);
-        }
-        for (const p of sf.pinned) {
-          if (p.type === "folder") {
-            this.log(`  Folder "${p.title}": ${p.children.length} bookmarks`);
-          } else {
-            this.log(`  Pinned: "${p.title}" → ${p.url?.substring(0, 60)}`);
-          }
-        }
-      }
-      // ── END DEBUG ──────────────────────────────────────────────────
 
       // 4. Find or create each Zen Space.
       const spaceMap = new Map(); // spaceName → workspace object
@@ -971,15 +941,11 @@ export class SimpleBookmarkSyncManager {
             .map(c => ({ title: c.title, url: c.uri }));
           sf.essentials.push({ containerName: item.title, items });
         } else {
-          // Named subfolder → Zen folder wrapping pinned tabs.
-          const folderNode = { type: "folder", title: item.title, children: [] };
-          for (const bm of item?.children ?? []) {
-            if (bm.uri != null) {
-              folderNode.children.push({ type: "bookmark", title: bm.title, url: bm.uri });
-            }
-            // Sub-sub-folders (depth > 1) are not supported in this version.
-          }
-          sf.pinned.push(folderNode);
+          // Named subfolder → Zen folder(s) wrapping pinned tabs.
+          // Recursively collects bookmarks at all depths.  Each sub-folder
+          // at any depth becomes an independent folder entry, matching the
+          // flat Zen folder model in the browser.
+          this._collectFolderItems(item, sf.pinned);
         }
       }
 
@@ -987,6 +953,30 @@ export class SimpleBookmarkSyncManager {
     }
 
     return spaceFolders;
+  }
+
+  /**
+   * Recursively collect bookmarks from a named bookmark folder node.
+   *
+   * Direct bookmarks become children of a folder entry named after
+   * `folderNode.title`.  Sub-folders are recursed into and each produces its
+   * own independent folder entry in `pinnedList`, representing a separate Zen
+   * folder in the browser (Zen folders are flat, so nested bookmark folders
+   * map to sibling Zen folders).
+   */
+  _collectFolderItems(folderNode, pinnedList) {
+    const entry = { type: "folder", title: folderNode.title, children: [] };
+
+    for (const child of folderNode?.children ?? []) {
+      if (child.uri != null) {
+        entry.children.push({ type: "bookmark", title: child.title, url: child.uri });
+      } else {
+        // Sub-folder → recurse; produces its own folder entry.
+        this._collectFolderItems(child, pinnedList);
+      }
+    }
+
+    pinnedList.push(entry);
   }
 
   /**
