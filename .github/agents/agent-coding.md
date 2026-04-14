@@ -73,5 +73,6 @@ All approved and implemented specifications live in `specs/`:
 
 | Spec file | Feature | Status |
 |---|---|---|
-| `specs/SimpleBookmarkSync.spec.md` | One-way tab-to-bookmark sync (`SimpleBookmarkSyncManager`) | Draft — pending review |
+| `specs/SimpleBookmarkSync.spec.md` | One-way tab-to-bookmark sync (`SimpleBookmarkSyncManager`) | Implemented |
+| `specs/SpaceMetadataSync.spec.md` | Space icon/theme metadata in bookmarks + rename detection | Implemented — 2026-04-14 |
 

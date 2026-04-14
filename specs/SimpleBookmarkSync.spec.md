@@ -1,6 +1,6 @@
 # Specification — SimpleBookmarkSync
 
-**Status:** Approved — ready for implementation  
+**Status:** Implemented — 2026-04-14  
 **Author:** GitHub Copilot  
 **Date:** 2026-04-14  
 

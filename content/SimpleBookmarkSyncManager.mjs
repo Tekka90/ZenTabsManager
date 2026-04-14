@@ -29,6 +29,7 @@ export class SimpleBookmarkSyncManager {
 
     try {
       const PlacesUtils = this.manager.window.PlacesUtils;
+      const win = this.manager.window;
 
       // 1. Build desired bookmark tree from live tabs.
       const desiredRoot = await this.buildDesiredTree();
@@ -39,8 +40,22 @@ export class SimpleBookmarkSyncManager {
         "ZenTabs"
       );
 
-      // 3. Reconcile the desired tree against bookmarks.
+      // 3. Get live spaces for rename detection and metadata sync.
+      const liveSpaces = win.gZenWorkspaces?.getWorkspaces() ?? [];
+
+      // 4. Detect and apply renames before reconciling content.
+      await this._detectAndApplyRenames(rootGuid, liveSpaces, result);
+
+      // 5. Reconcile the desired tree against bookmarks.
       await this._reconcileFolder(rootGuid, desiredRoot.children, result);
+
+      // 6. Sync space metadata (icon, theme) after content.
+      const syncedSpaces = liveSpaces.map(ws => ({
+        name: ws.name,
+        icon: ws.icon ?? null,
+        theme: ws.theme ?? {},
+      }));
+      await this._syncSpaceMetadata(rootGuid, syncedSpaces, result);
 
       this.log(
         `Sync complete — created:${result.created} updated:${result.updated} deleted:${result.deleted}`
@@ -67,8 +82,9 @@ export class SimpleBookmarkSyncManager {
     const win = this.manager.window;
     const allTabs = win.gZenWorkspaces?.allStoredTabs ?? win.gBrowser.tabs;
 
-    // Group tabs by workspace UUID.
-    const byWorkspace = new Map(); // uuid → { workspace, tabs: [] }
+    // Group tabs by workspace ID (UUID used only as a transient in-memory key —
+    // never stored in bookmarks; the stable key written to disk is the space name).
+    const byWorkspace = new Map(); // wsId → { workspace, tabs: [] }
 
     for (const tab of allTabs) {
       if (tab.hasAttribute("zen-empty-tab")) continue;
@@ -311,13 +327,14 @@ export class SimpleBookmarkSyncManager {
 
     // Delete stale items (not matched by any desired entry).
     for (const item of existing) {
-      if (!matched.has(item.guid)) {
-        try {
-          await PlacesUtils.bookmarks.remove(item.guid);
-          result.deleted++;
-        } catch (e) {
-          result.errors.push(`delete ${item.guid}: ${e.message}`);
-        }
+      if (matched.has(item.guid)) continue;
+      // Skip the __spaces__ metadata folder — managed separately by _syncSpaceMetadata().
+      if (item.uri == null && item.title === "__spaces__") continue;
+      try {
+        await PlacesUtils.bookmarks.remove(item.guid);
+        result.deleted++;
+      } catch (e) {
+        result.errors.push(`delete ${item.guid}: ${e.message}`);
       }
     }
 
@@ -519,5 +536,261 @@ export class SimpleBookmarkSyncManager {
 
   log(...args) {
     this.manager.log("[SimpleSyncManager]", ...args);
+  }
+
+  // ── Space Rename Detection ───────────────────────────────────────────────
+
+  /**
+   * Before reconciling folder content, detect spaces that were renamed
+   * (vs. deleted+new) using Jaccard URL-set similarity.
+   * Applies renames in-place so the subsequent reconcile sees correct titles.
+   */
+  async _detectAndApplyRenames(rootGuid, liveSpaces, result) {
+    const PlacesUtils = this.manager.window.PlacesUtils;
+
+    const tree = await PlacesUtils.promiseBookmarksTree(rootGuid);
+    const existingFolders = (tree?.children ?? []).filter(
+      c => c.uri == null && c.title !== "__spaces__"
+    );
+
+    const knownNames = new Set(existingFolders.map(f => f.title));
+    const liveNames  = new Set(liveSpaces.map(ws => ws.name));
+
+    const removed = [...knownNames].filter(n => !liveNames.has(n));
+    const added   = [...liveNames].filter(n => !knownNames.has(n));
+
+    if (removed.length === 0 || added.length === 0) return;
+
+    const win = this.manager.window;
+    const allTabs = win.gZenWorkspaces?.allStoredTabs ?? win.gBrowser.tabs;
+
+    // Build URL sets for each "added" (new-name) space from live tabs.
+    // ws.uuid is used here only as a transient runtime key (the only Zen API
+    // available to map a tab to its space).  It is never written to bookmarks.
+    const liveUrlsByName = new Map();
+    for (const ws of liveSpaces) {
+      if (!added.includes(ws.name)) continue;
+      const urls = new Set();
+      for (const tab of allTabs) {
+        if (tab.getAttribute("zen-workspace-id") !== ws.uuid) continue;
+        const type = this._getTabType(tab);
+        if (type === "normal") continue;
+        const url = type === "pinned"
+          ? this.getPinnedUrl(tab)
+          : this.getEssentialUrl(tab);
+        if (url && !this._isBlankUrl(url)) urls.add(url);
+      }
+      liveUrlsByName.set(ws.name, urls);
+    }
+
+    // Build URL sets for each "removed" (old-name) space from existing bookmarks.
+    const bookmarkUrlsByName = new Map();
+    for (const name of removed) {
+      const folder = existingFolders.find(f => f.title === name);
+      if (!folder) continue;
+      const urls = await this._collectBookmarkUrls(folder.guid);
+      bookmarkUrlsByName.set(name, urls);
+    }
+
+    // Score all (removed, added) pairs and sort by similarity descending.
+    const pairs = [];
+    for (const rName of removed) {
+      for (const aName of added) {
+        const A = bookmarkUrlsByName.get(rName) ?? new Set();
+        const B = liveUrlsByName.get(aName)    ?? new Set();
+        pairs.push({ rName, aName, sim: this._jaccard(A, B) });
+      }
+    }
+    pairs.sort((a, b) => b.sim - a.sim);
+
+    // Greedy assignment: highest-similarity pair first.
+    const usedRemoved = new Set();
+    const usedAdded   = new Set();
+    for (const { rName, aName, sim } of pairs) {
+      if (usedRemoved.has(rName) || usedAdded.has(aName)) continue;
+      if (sim >= 0.5) {
+        usedRemoved.add(rName);
+        usedAdded.add(aName);
+        await this._renameSpaceInBookmarks(
+          rootGuid, rName, aName, existingFolders, result
+        );
+      }
+      // sim < 0.5 → treat as delete + new (handled by reconcile naturally).
+    }
+  }
+
+  /**
+   * Recursively collect all bookmark URLs inside a folder.
+   */
+  async _collectBookmarkUrls(folderGuid) {
+    const PlacesUtils = this.manager.window.PlacesUtils;
+    const tree = await PlacesUtils.promiseBookmarksTree(folderGuid);
+    const urls = new Set();
+    const collect = (children) => {
+      for (const child of children ?? []) {
+        if (child.uri != null) {
+          urls.add(child.uri);
+        } else {
+          collect(child.children);
+        }
+      }
+    };
+    collect(tree?.children);
+    return urls;
+  }
+
+  /**
+   * Return the Jaccard similarity between two URL sets.
+   * Returns 0 when both sets are empty (undefined case treated as no match).
+   */
+  _jaccard(A, B) {
+    if (A.size === 0 && B.size === 0) return 0;
+    let intersection = 0;
+    for (const u of A) { if (B.has(u)) intersection++; }
+    const union = new Set([...A, ...B]).size;
+    return union === 0 ? 0 : intersection / union;
+  }
+
+  /**
+   * Rename a space folder and its metadata bookmark from `oldName` to `newName`.
+   */
+  async _renameSpaceInBookmarks(rootGuid, oldName, newName, existingFolders, result) {
+    const PlacesUtils = this.manager.window.PlacesUtils;
+
+    // Rename the content folder.
+    const folder = existingFolders.find(f => f.title === oldName);
+    if (folder) {
+      try {
+        await PlacesUtils.bookmarks.update({ guid: folder.guid, title: newName });
+        result.updated++;
+      } catch (e) {
+        result.errors.push(`rename folder ${oldName}→${newName}: ${e.message}`);
+      }
+    }
+
+    // Rename the metadata bookmark inside __spaces__/ if it exists.
+    try {
+      const rootTree  = await PlacesUtils.promiseBookmarksTree(rootGuid);
+      const metaEntry = (rootTree?.children ?? []).find(
+        c => c.uri == null && c.title === "__spaces__"
+      );
+      if (metaEntry) {
+        const metaTree = await PlacesUtils.promiseBookmarksTree(metaEntry.guid);
+        const metaBm   = (metaTree?.children ?? []).find(
+          c => c.uri != null && c.title === oldName
+        );
+        if (metaBm) {
+          await PlacesUtils.bookmarks.update({ guid: metaBm.guid, title: newName });
+          result.updated++;
+        }
+      }
+    } catch (e) {
+      result.errors.push(`rename metadata ${oldName}→${newName}: ${e.message}`);
+    }
+  }
+
+  // ── Space Metadata Sync ──────────────────────────────────────────────────
+
+  /**
+   * Upsert one metadata bookmark per space into the __spaces__/ folder.
+   * syncedSpaces: Array<{ name, icon, theme }>
+   */
+  async _syncSpaceMetadata(rootGuid, syncedSpaces, result) {
+    const PlacesUtils = this.manager.window.PlacesUtils;
+
+    const metaFolderGuid = await this._getOrCreateFolder(rootGuid, "__spaces__");
+
+    const tree     = await PlacesUtils.promiseBookmarksTree(metaFolderGuid);
+    const existing = tree?.children ?? [];
+
+    const matched = new Set();
+
+    for (const space of syncedSpaces) {
+      const encoded  = this._encodeSpaceMetadata(space);
+      const existing_ = existing.find(c => c.uri != null && c.title === space.name);
+
+      if (existing_) {
+        matched.add(existing_.guid);
+        if (existing_.uri !== encoded) {
+          try {
+            await PlacesUtils.bookmarks.update({ guid: existing_.guid, url: encoded });
+            result.updated++;
+          } catch (e) {
+            result.errors.push(`update metadata ${space.name}: ${e.message}`);
+          }
+        }
+      } else {
+        try {
+          await PlacesUtils.bookmarks.insert({
+            parentGuid: metaFolderGuid,
+            type:       PlacesUtils.bookmarks.TYPE_BOOKMARK,
+            title:      space.name,
+            url:        encoded,
+          });
+          result.created++;
+        } catch (e) {
+          result.errors.push(`create metadata ${space.name}: ${e.message}`);
+        }
+      }
+    }
+
+    // Delete stale metadata bookmarks.
+    for (const item of existing) {
+      if (!matched.has(item.guid)) {
+        try {
+          await PlacesUtils.bookmarks.remove(item.guid);
+          result.deleted++;
+        } catch (e) {
+          result.errors.push(`delete metadata ${item.title}: ${e.message}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Encode space metadata as a data: URI containing URL-encoded JSON.
+   */
+  _encodeSpaceMetadata({ name, icon, theme }) {
+    const payload = { v: 1, name, icon: icon ?? null, theme: theme ?? {} };
+    return "data:application/json," + encodeURIComponent(JSON.stringify(payload));
+  }
+
+  /**
+   * Read back space metadata from the __spaces__/ bookmark folder.
+   * Returns Map<name, { icon, theme }>.  Returns empty Map on any error.
+   */
+  async readSpaceMetadata() {
+    const PlacesUtils = this.manager.window.PlacesUtils;
+    const result = new Map();
+    try {
+      const toolbarTree = await PlacesUtils.promiseBookmarksTree(
+        PlacesUtils.bookmarks.toolbarGuid
+      );
+      const zenTabsEntry = (toolbarTree?.children ?? []).find(
+        c => c.uri == null && c.title === "ZenTabs"
+      );
+      if (!zenTabsEntry) return result;
+
+      const zenTabsTree = await PlacesUtils.promiseBookmarksTree(zenTabsEntry.guid);
+      const metaEntry   = (zenTabsTree?.children ?? []).find(
+        c => c.uri == null && c.title === "__spaces__"
+      );
+      if (!metaEntry) return result;
+
+      const metaTree = await PlacesUtils.promiseBookmarksTree(metaEntry.guid);
+      for (const item of metaTree?.children ?? []) {
+        if (item.uri == null) continue;
+        try {
+          const json   = decodeURIComponent(item.uri.replace("data:application/json,", ""));
+          const parsed = JSON.parse(json);
+          result.set(parsed.name, { icon: parsed.icon ?? null, theme: parsed.theme ?? {} });
+        } catch (_) {
+          // Malformed entry — skip silently.
+        }
+      }
+    } catch (_) {
+      // Return empty Map on any unexpected error.
+    }
+    return result;
   }
 }

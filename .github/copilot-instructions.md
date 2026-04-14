@@ -125,6 +125,8 @@ Zen calls this feature **Spaces** in the UI, but the internal code uses the term
 
 **Important**: DO NOT use `getWorkspaceById()` — it does not exist. The correct method is `getWorkspaceFromId(uuid)`.
 
+**Critical — `space.uuid` is NOT a stable identity across profiles or browsers**: The UUID is generated locally and will differ if the user installs Zen on another machine, migrates their profile, or starts fresh. Never store a space UUID in bookmarks, exported data, or any artefact that must survive cross-profile use. Use the **space name** as the user-visible stable key, and pair it with rename detection (content similarity) when names change.
+
 **Critical — `gBrowser.tabs` only returns the active Space's tabs**: Zen physically moves tabs into per-space `<zen-workspace>` DOM containers inside `#tabbrowser-arrowscrollbox`. As a result, `gBrowser.tabs` only returns tabs from the currently active Space. To get tabs across **all** Spaces, always use `gZenWorkspaces.allStoredTabs` (falls back gracefully to `gBrowser.tabs` before Zen initializes). Example:
 ```javascript
 const tabs = window.gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
@@ -264,6 +266,7 @@ All approved feature specs live in the `specs/` directory. Consult the relevant 
 | Spec file | Feature | Status |
 |---|---|---|
 | `specs/SimpleBookmarkSync.spec.md` | One-way tab-to-bookmark sync (`SimpleBookmarkSyncManager`) | Approved — ready for implementation |
+| `specs/SpaceMetadataSync.spec.md` | Space icon/theme metadata in bookmarks + rename detection | Implemented — 2026-04-14 |
 
 ---
 
