@@ -151,12 +151,24 @@ export class SimpleBookmarkSyncManager {
 
   /**
    * Return the Firefox container display name for `containerTabId`.
-   * Returns "Essentials" for the default container (id === 0) or unknown.
+   * Returns "Essentials" for the default container (id === 0) or when the
+   * identity cannot be resolved.
+   *
+   * ContextualIdentityService is NOT a property of window in the Zen chrome
+   * context — it must be imported via ChromeUtils.  window is checked first
+   * so unit tests can still stub it there.
    */
   getContainerName(containerTabId) {
     if (!containerTabId) return "Essentials";
     try {
-      const svc = this.manager.window.ContextualIdentityService;
+      // Prefer a stubbed window instance (unit tests path).
+      let svc = this.manager.window.ContextualIdentityService;
+      // In the real browser the service must be imported directly.
+      if (!svc && typeof ChromeUtils !== "undefined") {
+        ({ ContextualIdentityService: svc } = ChromeUtils.importESModule(
+          "resource://gre/modules/ContextualIdentityService.sys.mjs"
+        ));
+      }
       const identity = svc?.getPublicIdentityFromId?.(containerTabId);
       return identity?.name ? `Essentials - ${identity.name}` : "Essentials";
     } catch (_) {
