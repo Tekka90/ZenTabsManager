@@ -162,7 +162,16 @@ export class SimpleBookmarkSyncManager {
     try {
       const svc = this.manager.window.ContextualIdentityService;
       const identity = svc?.getPublicIdentityFromId?.(containerTabId);
-      return identity?.name ? `Essentials - ${identity.name}` : "Essentials";
+      if (!identity) return "Essentials";
+      // Custom containers have `name`; built-in ones (Personal, Work, etc.)
+      // have `l10nId` like "user-context-personal" but no `name` field.
+      const label = identity.name ||
+        (identity.l10nId
+          ? identity.l10nId
+              .replace(/^user-context-/, "")
+              .replace(/^./, c => c.toUpperCase())
+          : null);
+      return label ? `Essentials - ${label}` : "Essentials";
     } catch (e) {
       console.error("[ZenTabs] getContainerName failed for id", containerTabId, e);
       return "Essentials";

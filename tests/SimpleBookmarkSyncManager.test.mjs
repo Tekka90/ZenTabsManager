@@ -339,6 +339,26 @@ describe("getContainerName", () => {
     assert.equal(sm.getContainerName(42), "Essentials - Work");
   });
 
+  test("uses l10nId when name is absent (built-in containers)", () => {
+    const mgr = makeManager();
+    mgr.window.ContextualIdentityService = {
+      getPublicIdentityFromId: (id) =>
+        id === 1 ? { l10nId: "user-context-personal" } : null,
+    };
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    assert.equal(sm.getContainerName(1), "Essentials - Personal");
+  });
+
+  test("uses l10nId without user-context- prefix", () => {
+    const mgr = makeManager();
+    mgr.window.ContextualIdentityService = {
+      getPublicIdentityFromId: (id) =>
+        id === 2 ? { l10nId: "user-context-work" } : null,
+    };
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    assert.equal(sm.getContainerName(2), "Essentials - Work");
+  });
+
   test("returns 'Essentials' when identity is not found for a numeric id", () => {
     const mgr = makeManager();
     mgr.window.ContextualIdentityService = {
