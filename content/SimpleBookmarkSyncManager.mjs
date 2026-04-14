@@ -832,10 +832,12 @@ export class SimpleBookmarkSyncManager {
       const spaceMetadata = await this.readSpaceMetadata();
 
       // 3. Parse the bookmark tree into structured space descriptors.
-      //    zenTabsEntry already contains the full recursive tree from
-      //    promiseBookmarksTree — traverse it directly rather than
-      //    re-fetching each sub-folder (which can lose children).
-      const spaceFolders = this._parseBookmarkTree(zenTabsEntry);
+      //    We must fetch the ZenTabs tree by its own GUID to get the full
+      //    recursive structure.  The zenTabsEntry found inside the toolbar
+      //    tree is only a shallow child node — its sub-children may not be
+      //    populated beyond one level.
+      const zenTabsTree = await PlacesUtils.promiseBookmarksTree(zenTabsEntry.guid);
+      const spaceFolders = this._parseBookmarkTree(zenTabsTree);
 
       // 4. Find or create each Zen Space.
       const spaceMap = new Map(); // spaceName → workspace object
