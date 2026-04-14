@@ -142,13 +142,10 @@ export class SimpleBookmarkSyncManager {
 
   /**
    * Return the URL for an essential tab.
+   * Essential tabs are pinned, so use the same recorded-URL logic.
    */
   getEssentialUrl(tab) {
-    const lazy = this.manager.window.SessionStore?.getLazyTabValue?.(tab, "url");
-    if (lazy && !this._isBlankUrl(lazy)) return lazy;
-
-    const live = tab.linkedBrowser?.currentURI?.spec;
-    return live ?? null;
+    return this.getPinnedUrl(tab);
   }
 
   /**
@@ -1103,10 +1100,12 @@ export class SimpleBookmarkSyncManager {
       matched:       false,
     }));
 
-    // Match desired → live by (url, containerTabId).
+    // Match desired → live by URL only.  Essential tabs in Zen are global
+    // (shared across all spaces) and may not carry a containerTabId matching
+    // the one resolved from the bookmark folder name.
     for (const d of resolved) {
       const idx = livePool.findIndex(
-        lp => !lp.matched && lp.url === d.url && lp.containerTabId === d.containerTabId
+        lp => !lp.matched && lp.url === d.url
       );
       if (idx !== -1) {
         livePool[idx].matched = true;
