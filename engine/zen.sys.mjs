@@ -16,6 +16,7 @@ class ZenTabsManager {
     this.tabManager = null;
     this.syncManager = null;
     this.cleanupManager = null;
+    this.simpleBookmarkSyncManager = null;
     this.uiManager = null;
     this.events = new EventTarget();
     
@@ -133,6 +134,7 @@ class ZenTabsManager {
     const { TabManager } = await import("../content/TabManager.mjs");
     const { SyncManager } = await import("../content/SyncManager.mjs");
     const { CleanupManager } = await import("../content/CleanupManager.mjs");
+    const { SimpleBookmarkSyncManager } = await import("../content/SimpleBookmarkSyncManager.mjs");
     
     this.tabManager = new TabManager(this);
     await this.tabManager.init();
@@ -142,6 +144,9 @@ class ZenTabsManager {
     
     this.cleanupManager = new CleanupManager(this);
     await this.cleanupManager.init();
+
+    this.simpleBookmarkSyncManager = new SimpleBookmarkSyncManager(this);
+    await this.simpleBookmarkSyncManager.init();
     
     console.log("[ZenTabs] Managers loaded");
   }

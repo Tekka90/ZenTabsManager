@@ -66,6 +66,8 @@ export class UIManager {
       this.addMenuItem(popup, "Sync from Bookmarks", () => this.syncFromBookmarks());
       this.addMenuItem(popup, "Bidirectional Sync", () => this.syncBidirectional());
       this.addMenuSeparator(popup);
+      this.addMenuItem(popup, "New Sync \u2014 To Bookmarks", () => this.simpleSyncToBookmarks());
+      this.addMenuSeparator(popup);
       this.addMenuItem(popup, "Cleanup Old Tabs", () => this.cleanupOldTabs());
       this.addMenuItem(popup, "Optimize Memory", () => this.optimizeMemory());
       this.addMenuSeparator(popup);
@@ -220,6 +222,21 @@ export class UIManager {
     this.manager.preferences.syncDirection = prev;
     console.log("✅ Bidirectional sync complete:", result);
     this.showNotification("Bidirectional Sync", `Bookmarks: +${result?.bookmarksCreated ?? 0}, Tabs opened: +${result?.tabsOpened ?? 0}`);
+  }
+
+  async simpleSyncToBookmarks() {
+    console.log("[ZenTabs] New Sync — syncing tabs to bookmarks...");
+    try {
+      const result = await this.manager.simpleBookmarkSyncManager.syncTabsToBookmarks();
+      console.log("✅ New Sync complete:", result);
+      this.showNotification(
+        "New Sync Complete",
+        `Created ${result.created}, updated ${result.updated}, deleted ${result.deleted}`
+      );
+    } catch (error) {
+      console.error("[ZenTabs] New Sync failed:", error);
+      this.showNotification("New Sync Failed", String(error));
+    }
   }
 
   async cleanupOldTabs() {

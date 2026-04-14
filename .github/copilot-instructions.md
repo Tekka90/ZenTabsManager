@@ -1,5 +1,7 @@
 # ZenTabs Manager — Copilot Instructions
 
+> **Workflow rules** (spec-first, review before implement, etc.) are defined in `.github/agent.md`. Read it before starting any task.
+
 ## Project Overview
 
 ZenTabs Manager is a **Zen Browser mod** that provides advanced tab management: bi-directional bookmark sync, automatic cleanup, memory optimization, and a toolbar UI. It is distributed via the [Sine mod loader](https://github.com/CosmoCreeper/Sine) and requires the "External marketplace" option enabled in Sine settings.
@@ -255,6 +257,16 @@ When researching internal Zen Browser APIs, components, or behavior, refer to th
 - There is no hot-reload — changes require restarting Zen Browser or reinstalling the mod.
 - The mod targets Zen Browser's internal structure; APIs like `tab.group`, `zen-essential`, and workspace attributes are Zen-specific and not present in standard Firefox.
 
+## Specifications
+
+All approved feature specs live in the `specs/` directory. Consult the relevant spec before working on any feature listed here.
+
+| Spec file | Feature | Status |
+|---|---|---|
+| `specs/SimpleBookmarkSync.spec.md` | One-way tab-to-bookmark sync (`SimpleBookmarkSyncManager`) | Approved — ready for implementation |
+
+---
+
 ## Testing Requirements
 
 **Every code change must be accompanied by unit tests.** This is a hard rule.
@@ -278,6 +290,7 @@ When researching internal Zen Browser APIs, components, or behavior, refer to th
 | Source file | Test file |
 |---|---|
 | `content/SyncManager.mjs` | `tests/SyncManager.test.mjs` |
+| `content/SimpleBookmarkSyncManager.mjs` | `tests/SimpleBookmarkSyncManager.test.mjs` |
 | `content/TabManager.mjs` | `tests/TabManager.test.mjs` |
 | `content/CleanupManager.mjs` | `tests/CleanupManager.test.mjs` |
 | `content/UI.mjs` | UI is XUL-only — no unit tests; verify manually in browser |
