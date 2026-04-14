@@ -68,6 +68,18 @@ describe("buildDesiredTree — empty spaces", () => {
     const tree = await sm.buildDesiredTree();
     assert.equal(tree.children.length, 0);
   });
+
+  test("tabs with no zen-workspace-id are skipped — no 'default' folder created", async () => {
+    const ws  = makeWorkspace("Work");
+    // Tab missing the zen-workspace-id attribute entirely.
+    const tab = makeTab({ url: "https://example.com", pinned: true });
+    tab._zenPinnedInitialState = { entry: { url: "https://example.com" } };
+    const sm  = makeSyncManager([ws], [tab]);
+    const tree = await sm.buildDesiredTree();
+    assert.equal(tree.children.length, 0, "no folder should be created for unassigned tabs");
+    const hasDefault = tree.children.some(c => c.title === "default");
+    assert.ok(!hasDefault, "'default' folder must never appear");
+  });
 });
 
 describe("buildDesiredTree — essential tabs only", () => {

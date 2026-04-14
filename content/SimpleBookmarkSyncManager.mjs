@@ -92,10 +92,15 @@ export class SimpleBookmarkSyncManager {
       const type = this._getTabType(tab);
       if (type === "normal") continue; // not synced
 
-      const wsId = tab.getAttribute("zen-workspace-id") ?? "default";
+      const wsId = tab.getAttribute("zen-workspace-id");
+      // Skip tabs with no space assignment — they are transient/system tabs
+      // that don't belong to any Zen Space and should not appear in sync output.
+      if (!wsId) continue;
 
       if (!byWorkspace.has(wsId)) {
         const ws = win.gZenWorkspaces?.getWorkspaceFromId(wsId) ?? null;
+        // Skip if the space no longer exists in the browser.
+        if (!ws) continue;
         byWorkspace.set(wsId, { workspace: ws, wsId, tabs: [] });
       }
       byWorkspace.get(wsId).tabs.push(tab);
@@ -103,9 +108,9 @@ export class SimpleBookmarkSyncManager {
 
     const rootChildren = [];
 
-    for (const { workspace, wsId, tabs } of byWorkspace.values()) {
-      const spaceName = workspace?.name ?? wsId;
-      const containerTabId = workspace?.containerTabId ?? 0;
+    for (const { workspace, tabs } of byWorkspace.values()) {
+      const spaceName = workspace.name;
+      const containerTabId = workspace.containerTabId ?? 0;
 
       const spaceFolder = this._buildSpaceSubtree(
         spaceName,
