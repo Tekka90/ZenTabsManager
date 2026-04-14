@@ -832,12 +832,40 @@ export class SimpleBookmarkSyncManager {
       const spaceMetadata = await this.readSpaceMetadata();
 
       // 3. Parse the bookmark tree into structured space descriptors.
-      //    We must fetch the ZenTabs tree by its own GUID to get the full
-      //    recursive structure.  The zenTabsEntry found inside the toolbar
-      //    tree is only a shallow child node — its sub-children may not be
-      //    populated beyond one level.
+      //    Fetch the ZenTabs tree by its own GUID.
       const zenTabsTree = await PlacesUtils.promiseBookmarksTree(zenTabsEntry.guid);
+
+      // ── DEBUG: dump tree shape so we can diagnose parse issues ──────
+      const _dumpNode = (n, depth = 0) => {
+        const indent = "  ".repeat(depth);
+        const kids = n?.children?.length ?? 0;
+        const hasUri = n?.uri != null;
+        this.log(`${indent}[${hasUri ? "BM" : "DIR"}] "${n?.title}" guid=${n?.guid} uri=${hasUri ? n.uri.substring(0, 60) : "—"} children=${kids}`);
+        if (kids > 0 && depth < 3) {
+          for (const c of n.children) _dumpNode(c, depth + 1);
+        }
+      };
+      this.log("── zenTabsTree dump (depth ≤ 3) ──");
+      _dumpNode(zenTabsTree);
+      // ── END DEBUG ──────────────────────────────────────────────────
+
       const spaceFolders = this._parseBookmarkTree(zenTabsTree);
+
+      // ── DEBUG: dump parsed result ──────────────────────────────────
+      for (const sf of spaceFolders) {
+        this.log(`Space "${sf.name}": essentials=${sf.essentials.length} groups, pinned=${sf.pinned.length} items`);
+        for (const ef of sf.essentials) {
+          this.log(`  Essentials "${ef.containerName}": ${ef.items.length} items`);
+        }
+        for (const p of sf.pinned) {
+          if (p.type === "folder") {
+            this.log(`  Folder "${p.title}": ${p.children.length} bookmarks`);
+          } else {
+            this.log(`  Pinned: "${p.title}" → ${p.url?.substring(0, 60)}`);
+          }
+        }
+      }
+      // ── END DEBUG ──────────────────────────────────────────────────
 
       // 4. Find or create each Zen Space.
       const spaceMap = new Map(); // spaceName → workspace object
