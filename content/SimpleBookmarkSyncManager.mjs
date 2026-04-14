@@ -938,11 +938,10 @@ export class SimpleBookmarkSyncManager {
             .map(c => ({ title: c.title, url: c.uri }));
           sf.essentials.push({ containerName: item.title, items });
         } else {
-          // Named subfolder → Zen folder(s) wrapping pinned tabs.
-          // Recursively collects bookmarks at all depths.  Each sub-folder
-          // at any depth becomes an independent folder entry, matching the
-          // flat Zen folder model in the browser.
-          this._collectFolderItems(item, sf.pinned);
+          // Named subfolder → Zen folder wrapping pinned tabs.
+          // Recursively collects bookmarks preserving parent-child hierarchy
+          // so nested Zen folders can be created properly.
+          sf.pinned.push(this._collectFolderItems(item));
         }
       }
 
@@ -955,25 +954,25 @@ export class SimpleBookmarkSyncManager {
   /**
    * Recursively collect bookmarks from a named bookmark folder node.
    *
-   * Direct bookmarks become children of a folder entry named after
-   * `folderNode.title`.  Sub-folders are recursed into and each produces its
-   * own independent folder entry in `pinnedList`, representing a separate Zen
-   * folder in the browser (Zen folders are flat, so nested bookmark folders
-   * map to sibling Zen folders).
+   * Direct bookmarks and sub-folders both become children of the returned
+   * entry, preserving the bookmark hierarchy.  Sub-folders appear as
+   * { type: "folder" } children so the restore code can nest Zen folders.
+   *
+   * @returns {{ type: "folder", title: string, children: Array }}
    */
-  _collectFolderItems(folderNode, pinnedList) {
+  _collectFolderItems(folderNode) {
     const entry = { type: "folder", title: folderNode.title, children: [] };
 
     for (const child of folderNode?.children ?? []) {
       if (child.uri != null) {
         entry.children.push({ type: "bookmark", title: child.title, url: child.uri });
       } else {
-        // Sub-folder → recurse; produces its own folder entry.
-        this._collectFolderItems(child, pinnedList);
+        // Sub-folder → recurse and nest as a child of this entry.
+        entry.children.push(this._collectFolderItems(child));
       }
     }
 
-    pinnedList.push(entry);
+    return entry;
   }
 
   /**
@@ -1161,7 +1160,6 @@ export class SimpleBookmarkSyncManager {
     const win          = this.manager.window;
     const gBrowser     = win.gBrowser;
     const gZenWorkspaces = win.gZenWorkspaces;
-    const gZenFolders  = win.gZenFolders;
 
     // Build a consumable pool of live pinned tabs in this space.
     const livePool = livePinned.map(t => ({
@@ -1171,84 +1169,118 @@ export class SimpleBookmarkSyncManager {
       matched:    false,
     }));
 
-    const desiredRoot   = sf.pinned.filter(item => item.type === "bookmark");
-    const desiredFolders = sf.pinned.filter(item => item.type === "folder");
+    // Process pinned items in bookmark order (preserving interleaved
+    // bookmarks and folders so tabs/folders appear in the correct order).
+    for (const item of sf.pinned) {
+      if (item.type === "bookmark") {
+        if (!item.url || this._isBlankUrl(item.url)) continue;
 
-    // ── Root-level pinned tabs ─────────────────────────────────────────
-    for (const desired of desiredRoot) {
-      if (!desired.url || this._isBlankUrl(desired.url)) continue;
-
-      const idx = livePool.findIndex(
-        lp => !lp.matched && lp.url === desired.url && !lp.folderLabel
-      );
-      if (idx !== -1) {
-        livePool[idx].matched = true;
-      } else {
-        const desc =
-          `Create pinned tab "${desired.title}" (${desired.url}) in space "${sf.name}" [root]`;
-        if (dryRecord("created", "create-tab", desc,
-          { url: desired.url, title: desired.title, space: sf.name })) {
-          // live path
-          try {
-            const tab = gBrowser.addTrustedTab(desired.url, {
-              createLazyBrowser: true,
-              lazyTabTitle:      desired.title,
-              skipAnimation:     true,
-              triggeringPrincipal:
-                win.Services?.scriptSecurityManager?.getSystemPrincipal?.(),
-            });
-            tab.setAttribute("zen-workspace-id", ws.uuid);
-            gBrowser.pinTab(tab);
-            gZenWorkspaces.moveTabToWorkspace(tab, ws.uuid);
-            result.created++;
-          } catch (e) {
-            result.errors.push(`create pinned tab ${desired.url}: ${e.message}`);
-          }
-        }
-      }
-    }
-
-    // ── Zen-folder pinned tabs ─────────────────────────────────────────
-    for (const folder of desiredFolders) {
-      const folderBms = (folder.children ?? []).filter(
-        bm => bm.url && !this._isBlankUrl(bm.url)
-      );
-      if (folderBms.length === 0) continue;
-
-      const toCreate = [];
-      for (const bm of folderBms) {
         const idx = livePool.findIndex(
-          lp => !lp.matched && lp.url === bm.url && lp.folderLabel === folder.title
+          lp => !lp.matched && lp.url === item.url && !lp.folderLabel
         );
         if (idx !== -1) {
           livePool[idx].matched = true;
         } else {
-          toCreate.push(bm);
-        }
-      }
-
-      if (toCreate.length === 0) continue;
-
-      const desc = `Create Zen folder "${folder.title}" with ${toCreate.length} tab(s) in space "${sf.name}"`;
-      const executing = dryRecord("created", "create-zen-folder", desc,
-        { folder: folder.title, space: sf.name });
-      if (executing) {
-        try {
-          // Look for an existing folder with this name in this workspace.
-          const allLiveTabs = gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
-          let existingFolder = null;
-          for (const lt of allLiveTabs) {
-            if (
-              lt.getAttribute("zen-workspace-id") === ws.uuid &&
-              lt.group?.isZenFolder &&
-              lt.group.label === folder.title
-            ) {
-              existingFolder = lt.group;
-              break;
+          const desc =
+            `Create pinned tab "${item.title}" (${item.url}) in space "${sf.name}" [root]`;
+          if (dryRecord("created", "create-tab", desc,
+            { url: item.url, title: item.title, space: sf.name })) {
+            try {
+              const tab = gBrowser.addTrustedTab(item.url, {
+                createLazyBrowser: true,
+                lazyTabTitle:      item.title,
+                skipAnimation:     true,
+                triggeringPrincipal:
+                  win.Services?.scriptSecurityManager?.getSystemPrincipal?.(),
+              });
+              tab.setAttribute("zen-workspace-id", ws.uuid);
+              gBrowser.pinTab(tab);
+              gZenWorkspaces.moveTabToWorkspace(tab, ws.uuid);
+              result.created++;
+            } catch (e) {
+              result.errors.push(`create pinned tab ${item.url}: ${e.message}`);
             }
           }
+        }
+      } else if (item.type === "folder") {
+        await this._reconcileFolderRecursive(
+          item, null, sf, ws, livePool, dryRecord, result
+        );
+      }
+    }
 
-          if (existingFolder) {
+    // ── Delete unmatched live pinned tabs in this space ────────────────
+    for (const lp of livePool) {
+      if (lp.matched) continue;
+      const desc = `Delete pinned tab "${lp.url}" from space "${sf.name}"`;
+      if (dryRecord("deleted", "delete-tab", desc, { url: lp.url, space: sf.name })) {
+        try {
+          gBrowser.removeTab(lp.tab, { skipPermitUnload: true });
+          result.deleted++;
+        } catch (e) {
+          result.errors.push(`delete pinned tab ${lp.url}: ${e.message}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Recursively reconcile a Zen folder entry and its nested sub-folders.
+   *
+   * Creates the folder (or finds an existing one), creates missing tabs
+   * inside it, then recurses into any sub-folder children — nesting them
+   * inside the parent via `insertAfter` on the parent's groupContainer.
+   */
+  async _reconcileFolderRecursive(folderEntry, parentFolder, sf, ws, livePool, dryRecord, result) {
+    const win          = this.manager.window;
+    const gBrowser     = win.gBrowser;
+    const gZenWorkspaces = win.gZenWorkspaces;
+    const gZenFolders  = win.gZenFolders;
+
+    // Separate direct bookmarks from sub-folders within this folder entry.
+    const directBookmarks = (folderEntry.children ?? []).filter(
+      c => c.type === "bookmark" && c.url && !this._isBlankUrl(c.url)
+    );
+    const subFolders = (folderEntry.children ?? []).filter(c => c.type === "folder");
+
+    if (directBookmarks.length === 0 && subFolders.length === 0) return;
+
+    // Match direct bookmarks against the live pool.
+    const toCreate = [];
+    for (const bm of directBookmarks) {
+      const idx = livePool.findIndex(
+        lp => !lp.matched && lp.url === bm.url && lp.folderLabel === folderEntry.title
+      );
+      if (idx !== -1) {
+        livePool[idx].matched = true;
+      } else {
+        toCreate.push(bm);
+      }
+    }
+
+    // Resolve or create the Zen folder reference.
+    let folderRef = null;
+
+    // First, look for an existing folder with this name in this workspace.
+    const allLiveTabs = gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
+    for (const lt of allLiveTabs) {
+      if (
+        lt.getAttribute("zen-workspace-id") === ws.uuid &&
+        lt.group?.isZenFolder &&
+        lt.group.label === folderEntry.title
+      ) {
+        folderRef = lt.group;
+        break;
+      }
+    }
+
+    if (toCreate.length > 0) {
+      const desc = `Create Zen folder "${folderEntry.title}" with ${toCreate.length} tab(s) in space "${sf.name}"`;
+      const executing = dryRecord("created", "create-zen-folder", desc,
+        { folder: folderEntry.title, space: sf.name });
+      if (executing) {
+        try {
+          if (folderRef) {
             // Folder exists — insert new tabs into it.
             for (const bm of toCreate) {
               const tab = gBrowser.addTrustedTab(bm.url, {
@@ -1260,7 +1292,7 @@ export class SimpleBookmarkSyncManager {
               });
               tab.setAttribute("zen-workspace-id", ws.uuid);
               gBrowser.pinTab(tab);
-              existingFolder.addTabs([tab]);
+              folderRef.addTabs([tab]);
               result.created++;
             }
           } else {
@@ -1278,10 +1310,15 @@ export class SimpleBookmarkSyncManager {
               newTabs.push(tab);
             }
             if (gZenFolders?.createFolder) {
-              gZenFolders.createFolder(newTabs, {
-                label:       folder.title,
+              const opts = {
+                label:       folderEntry.title,
                 workspaceId: ws.uuid,
-              });
+              };
+              // Nest inside parent folder if one was provided.
+              if (parentFolder?.groupContainer) {
+                opts.insertAfter = parentFolder.groupContainer.lastElementChild;
+              }
+              folderRef = gZenFolders.createFolder(newTabs, opts);
             } else {
               // Fallback: pin each tab and assign to workspace.
               for (const tab of newTabs) {
@@ -1292,27 +1329,31 @@ export class SimpleBookmarkSyncManager {
             result.created += toCreate.length;
           }
         } catch (e) {
-          result.errors.push(`create folder "${folder.title}": ${e.message}`);
+          result.errors.push(`create folder "${folderEntry.title}": ${e.message}`);
         }
       } else if (toCreate.length > 1) {
-        // Dry-run: dryRecord already counting +1 for the folder entry;
+        // Dry-run: dryRecord already counted +1 for the folder entry;
         // increment for the remaining tabs so the total matches reality.
         result.created += toCreate.length - 1;
       }
+    } else if (!folderRef && subFolders.length > 0 && gZenFolders?.createFolder) {
+      // No tabs to create, but sub-folders need a parent.  Create an empty
+      // folder (Zen always adds an internal empty-tab placeholder).
+      const opts = {
+        label:       folderEntry.title,
+        workspaceId: ws.uuid,
+      };
+      if (parentFolder?.groupContainer) {
+        opts.insertAfter = parentFolder.groupContainer.lastElementChild;
+      }
+      folderRef = gZenFolders.createFolder([], opts);
     }
 
-    // ── Delete unmatched live pinned tabs in this space ────────────────
-    for (const lp of livePool) {
-      if (lp.matched) continue;
-      const desc = `Delete pinned tab "${lp.url}" from space "${sf.name}"`;
-      if (dryRecord("deleted", "delete-tab", desc, { url: lp.url, space: sf.name })) {
-        try {
-          gBrowser.removeTab(lp.tab, { skipPermitUnload: true });
-          result.deleted++;
-        } catch (e) {
-          result.errors.push(`delete pinned tab ${lp.url}: ${e.message}`);
-        }
-      }
+    // Recursively handle sub-folders, nesting them inside this folder.
+    for (const subFolder of subFolders) {
+      await this._reconcileFolderRecursive(
+        subFolder, folderRef, sf, ws, livePool, dryRecord, result
+      );
     }
   }
 

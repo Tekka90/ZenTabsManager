@@ -240,6 +240,9 @@ export function makeGZenWorkspaces(workspaces = [], allTabs = []) {
       const existing = byUuid.get(workspaceData.uuid);
       if (existing) Object.assign(existing, workspaceData);
     },
+    moveTabToWorkspace(tab, uuid) {
+      tab.setAttribute("zen-workspace-id", uuid);
+    },
   };
   return obj;
 }

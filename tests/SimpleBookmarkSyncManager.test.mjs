@@ -943,7 +943,7 @@ describe("_parseBookmarkTree", () => {
     assert.deepEqual(spaces, []);
   });
 
-  test("nested sub-folders are extracted as independent folder entries", async () => {
+  test("nested sub-folders are preserved as children of the parent folder", async () => {
     const mgr = makeManager();
     const store = mgr.window.PlacesUtils.bookmarks._store;
     store.clear();
@@ -959,21 +959,25 @@ describe("_parseBookmarkTree", () => {
     const spaces = sm._parseBookmarkTree(node);
     const work = spaces[0];
 
-    const folders = work.pinned.filter(i => i.type === "folder");
-    assert.equal(folders.length, 2, "Outer + Inner should be two separate folder entries");
+    // Only one top-level folder: Outer
+    const topFolders = work.pinned.filter(i => i.type === "folder");
+    assert.equal(topFolders.length, 1, "Only Outer should be a top-level entry");
 
-    const inner = folders.find(f => f.title === "Inner");
-    assert.ok(inner, "Inner folder should exist as a top-level entry");
+    const outer = topFolders[0];
+    assert.equal(outer.title, "Outer");
+    // Outer has a bookmark and a nested folder
+    assert.equal(outer.children.length, 2);
+    assert.equal(outer.children[0].type, "bookmark");
+    assert.equal(outer.children[0].url, "https://a.com");
+
+    const inner = outer.children[1];
+    assert.equal(inner.type, "folder");
+    assert.equal(inner.title, "Inner");
     assert.equal(inner.children.length, 1);
     assert.equal(inner.children[0].url, "https://b.com");
-
-    const outer = folders.find(f => f.title === "Outer");
-    assert.ok(outer, "Outer folder should exist as a top-level entry");
-    assert.equal(outer.children.length, 1);
-    assert.equal(outer.children[0].url, "https://a.com");
   });
 
-  test("deeply nested bookmarks at 3+ levels are all collected", async () => {
+  test("deeply nested bookmarks at 3+ levels are nested as children", async () => {
     const mgr = makeManager();
     const store = mgr.window.PlacesUtils.bookmarks._store;
     store.clear();
@@ -987,11 +991,22 @@ describe("_parseBookmarkTree", () => {
     const sm = new SimpleBookmarkSyncManager(mgr);
     const node = await getZenTabsNode(sm, "zt");
     const spaces = sm._parseBookmarkTree(node);
-    const folders = spaces[0].pinned.filter(i => i.type === "folder");
+    const topFolders = spaces[0].pinned.filter(i => i.type === "folder");
 
-    assert.equal(folders.length, 3, "A, B, C should all be extracted");
-    const c = folders.find(f => f.title === "C");
-    assert.ok(c);
+    // Only A at top level; B nested in A; C nested in B.
+    assert.equal(topFolders.length, 1, "Only A should be a top-level entry");
+    const a = topFolders[0];
+    assert.equal(a.title, "A");
+    assert.equal(a.children.length, 1);
+
+    const b = a.children[0];
+    assert.equal(b.type, "folder");
+    assert.equal(b.title, "B");
+    assert.equal(b.children.length, 1);
+
+    const c = b.children[0];
+    assert.equal(c.type, "folder");
+    assert.equal(c.title, "C");
     assert.equal(c.children.length, 1);
     assert.equal(c.children[0].url, "https://deep.com");
   });
@@ -1180,5 +1195,88 @@ describe("syncBookmarksToTabs — live", () => {
     const sm = new SimpleBookmarkSyncManager(mgr);
     const result = await sm.syncBookmarksToTabs();
     assert.equal(result.created, 0, "existing essential tab must not be duplicated");
+  });
+});
+
+// ── syncBookmarksToTabs — folder nesting ──────────────────────────────────
+
+describe("syncBookmarksToTabs — folder nesting", () => {
+  function makeSyncManagerWithNestedFolders() {
+    const mgr   = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    // Toolbar → ZenTabs/ → Work/ → Outer/ → bm-a  +  Inner/ → bm-b
+    store.set("toolbar",      { guid: "toolbar",       parentGuid: null,           type: "folder",   title: "Bookmarks Toolbar", url: null });
+    store.set("zt",           { guid: "zt",            parentGuid: "toolbar",      type: "folder",   title: "ZenTabs",          url: null });
+    store.set("ws-work",      { guid: "ws-work",       parentGuid: "zt",           type: "folder",   title: "Work",             url: null });
+    store.set("folder-outer", { guid: "folder-outer",  parentGuid: "ws-work",      type: "folder",   title: "Outer",            url: null });
+    store.set("bm-a",         { guid: "bm-a",          parentGuid: "folder-outer", type: "bookmark", title: "A",                url: "https://a.com" });
+    store.set("folder-inner", { guid: "folder-inner",  parentGuid: "folder-outer", type: "folder",   title: "Inner",            url: null });
+    store.set("bm-b",         { guid: "bm-b",          parentGuid: "folder-inner", type: "bookmark", title: "B",                url: "https://b.com" });
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      []
+    );
+    return mgr;
+  }
+
+  test("nested folder is created inside parent folder via insertAfter", async () => {
+    const mgr = makeSyncManagerWithNestedFolders();
+    const sm  = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs();
+    assert.equal(result.errors.length, 0);
+
+    const folders = mgr.window.gZenFolders._createdFolders;
+    assert.equal(folders.length, 2, "Outer + Inner folders created");
+
+    const outer = folders.find(f => f.label === "Outer");
+    const inner = folders.find(f => f.label === "Inner");
+    assert.ok(outer, "Outer folder exists");
+    assert.ok(inner, "Inner folder exists");
+
+    // Inner's parentFolder should be Outer (nesting via insertAfter).
+    assert.equal(inner.parentFolder, outer, "Inner must be nested inside Outer");
+  });
+
+  test("dry-run counts nested folder tabs correctly", async () => {
+    const mgr = makeSyncManagerWithNestedFolders();
+    const sm  = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs({ dryRun: true });
+    // 2 folder creation entries (Outer with 1 tab, Inner with 1 tab)
+    assert.equal(result.created, 2, "should count both folder tabs");
+  });
+});
+
+// ── syncBookmarksToTabs — bookmark order preservation ─────────────────────
+
+describe("syncBookmarksToTabs — order preservation", () => {
+  test("interleaved bookmarks and folders are created in bookmark order", async () => {
+    const mgr   = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    // Order: bm-1, folder-A (bm-2), bm-3
+    store.set("toolbar",  { guid: "toolbar",  parentGuid: null,       type: "folder",   title: "Bookmarks Toolbar", url: null });
+    store.set("zt",       { guid: "zt",       parentGuid: "toolbar",  type: "folder",   title: "ZenTabs",          url: null });
+    store.set("ws",       { guid: "ws",       parentGuid: "zt",       type: "folder",   title: "Work",             url: null });
+    store.set("bm-1",     { guid: "bm-1",     parentGuid: "ws",       type: "bookmark", title: "First",            url: "https://first.com" });
+    store.set("folder-a", { guid: "folder-a",  parentGuid: "ws",       type: "folder",   title: "FolderA",          url: null });
+    store.set("bm-2",     { guid: "bm-2",     parentGuid: "folder-a", type: "bookmark", title: "InFolder",         url: "https://infolder.com" });
+    store.set("bm-3",     { guid: "bm-3",     parentGuid: "ws",       type: "bookmark", title: "Last",             url: "https://last.com" });
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      []
+    );
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs();
+    assert.equal(result.errors.length, 0);
+
+    // Verify tabs were created in the correct order by inspecting gBrowser.tabs.
+    const tabs = mgr.window.gBrowser.tabs;
+    const urls = tabs.map(t => t.linkedBrowser.currentURI.spec);
+    const firstIdx = urls.indexOf("https://first.com");
+    const lastIdx  = urls.indexOf("https://last.com");
+    assert.ok(firstIdx >= 0, "First tab created");
+    assert.ok(lastIdx >= 0,  "Last tab created");
+    assert.ok(firstIdx < lastIdx, "First must appear before Last — bookmark order preserved");
   });
 });
