@@ -67,6 +67,8 @@ export class UIManager {
       this.addMenuItem(popup, "Bidirectional Sync", () => this.syncBidirectional());
       this.addMenuSeparator(popup);
       this.addMenuItem(popup, "New Sync \u2014 To Bookmarks", () => this.simpleSyncToBookmarks());
+      this.addMenuItem(popup, "New Sync \u2014 From Bookmarks", () => this.simpleSyncFromBookmarks());
+      this.addMenuItem(popup, "New Sync \u2014 From Bookmarks (dry)", () => this.simpleSyncFromBookmarksDryRun());
       this.addMenuSeparator(popup);
       this.addMenuItem(popup, "Cleanup Old Tabs", () => this.cleanupOldTabs());
       this.addMenuItem(popup, "Optimize Memory", () => this.optimizeMemory());
@@ -222,6 +224,36 @@ export class UIManager {
     this.manager.preferences.syncDirection = prev;
     console.log("✅ Bidirectional sync complete:", result);
     this.showNotification("Bidirectional Sync", `Bookmarks: +${result?.bookmarksCreated ?? 0}, Tabs opened: +${result?.tabsOpened ?? 0}`);
+  }
+
+  async simpleSyncFromBookmarks() {
+    console.log("[ZenTabs] Restore — syncing bookmarks to tabs...");
+    try {
+      const result = await this.manager.simpleBookmarkSyncManager.syncBookmarksToTabs();
+      console.log("Restore complete:", result);
+      this.showNotification(
+        "Restore Complete",
+        `Created ${result.created}, deleted ${result.deleted}`
+      );
+    } catch (error) {
+      console.error("[ZenTabs] Restore failed:", error);
+      this.showNotification("Restore Failed", String(error));
+    }
+  }
+
+  async simpleSyncFromBookmarksDryRun() {
+    console.log("[ZenTabs] Restore (dry-run) — previewing restore plan...");
+    try {
+      const result = await this.manager.simpleBookmarkSyncManager.syncBookmarksToTabs({ dryRun: true });
+      console.log("[ZenTabs][DryRun] Plan:", result.plan);
+      this.showNotification(
+        "Dry Run Complete",
+        `Would create ${result.created}, delete ${result.deleted} tabs — see console`
+      );
+    } catch (error) {
+      console.error("[ZenTabs] Dry run failed:", error);
+      this.showNotification("Dry Run Failed", String(error));
+    }
   }
 
   async simpleSyncToBookmarks() {

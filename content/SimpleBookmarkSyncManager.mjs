@@ -781,6 +781,519 @@ export class SimpleBookmarkSyncManager {
     return "data:application/json," + encodeURIComponent(JSON.stringify(payload));
   }
 
+  // ── Bookmarks → Tabs Sync ─────────────────────────────────────────────────
+
+  /**
+   * Main entry point — full idempotent overwrite sync (bookmarks → tabs).
+   *
+   * @param {{ dryRun?: boolean }} opts
+   * @returns {Promise<{ created: number, updated: number, deleted: number, errors: string[], plan?: Array }>}
+   *   When dryRun:true, `plan` is an array of PlanEntry objects describing
+   *   every action that would have been taken; no browser state is mutated.
+   */
+  async syncBookmarksToTabs({ dryRun = false } = {}) {
+    this.manager.dispatchEvent("simple-restore-started", {});
+    const result = { created: 0, updated: 0, deleted: 0, errors: [] };
+    if (dryRun) result.plan = [];
+
+    /**
+     * Helper: record a plan entry (always) and return whether execution
+     * should proceed (true = live, false = dry-run / skip).
+     * When dry-run, also increments `result[counterKey]` so counters stay
+     * accurate without executing.
+     */
+    const dryRecord = (counterKey, action, description, extras = {}) => {
+      if (dryRun) {
+        result.plan.push({ action, description, ...extras });
+        this.log("[DryRun]", description);
+        if (counterKey) result[counterKey]++;
+        return false; // skip execution
+      }
+      return true; // proceed with execution
+    };
+
+    try {
+      const PlacesUtils = this.manager.window.PlacesUtils;
+      const win = this.manager.window;
+
+      // 1. Locate ZenTabs/ on the Bookmarks Toolbar.
+      const toolbarTree = await PlacesUtils.promiseBookmarksTree(
+        PlacesUtils.bookmarks.toolbarGuid
+      );
+      const zenTabsEntry = (toolbarTree?.children ?? []).find(
+        c => c.uri == null && c.title === "ZenTabs"
+      );
+      if (!zenTabsEntry) {
+        this.log("syncBookmarksToTabs: ZenTabs/ folder not found — nothing to restore.");
+        return result;
+      }
+
+      // 2. Read space icon/theme metadata from __spaces__/.
+      const spaceMetadata = await this.readSpaceMetadata();
+
+      // 3. Parse the bookmark tree into structured space descriptors.
+      const spaceFolders = await this._parseBookmarkTree(zenTabsEntry.guid);
+
+      // 4. Find or create each Zen Space.
+      const spaceMap = new Map(); // spaceName → workspace object
+      for (const sf of spaceFolders) {
+        const ws = await this._findOrCreateSpace(sf.name, spaceMetadata, dryRecord, result);
+        if (ws) spaceMap.set(sf.name, ws);
+      }
+
+      // 5. Collect live Essential and Pinned tabs.
+      const allLiveTabs = win.gZenWorkspaces?.allStoredTabs ?? win.gBrowser.tabs;
+      const liveEssentials = allLiveTabs.filter(t => t.hasAttribute("zen-essential"));
+      const livePinnedBySpace = new Map();
+      for (const ws of spaceMap.values()) {
+        livePinnedBySpace.set(
+          ws.uuid,
+          allLiveTabs.filter(
+            t =>
+              t.pinned &&
+              !t.hasAttribute("zen-essential") &&
+              t.getAttribute("zen-workspace-id") === ws.uuid
+          )
+        );
+      }
+
+      // 6. Build deduplicated desired essential tab list across all spaces.
+      const desiredEssentials = this._buildDesiredEssentials(spaceFolders);
+
+      // 7. Reconcile essential tabs globally.
+      await this._reconcileEssentialTabs(
+        desiredEssentials,
+        liveEssentials,
+        dryRecord,
+        result
+      );
+
+      // 8. Reconcile pinned tabs per space.
+      for (const sf of spaceFolders) {
+        const ws = spaceMap.get(sf.name);
+        if (!ws) continue;
+        await this._reconcilePinnedTabsForSpace(
+          sf,
+          ws,
+          livePinnedBySpace.get(ws.uuid) ?? [],
+          dryRecord,
+          result
+        );
+      }
+
+      const tag = dryRun ? "(dry-run) " : "";
+      this.log(
+        `Restore ${tag}complete — created:${result.created} updated:${result.updated} deleted:${result.deleted}`
+      );
+      this.manager.dispatchEvent(
+        dryRun ? "simple-restore-dry-run-completed" : "simple-restore-completed",
+        { created: result.created, updated: result.updated, deleted: result.deleted }
+      );
+    } catch (err) {
+      console.error("[ZenTabs] SimpleBookmarkSyncManager restore error:", err);
+      result.errors.push(String(err));
+      this.manager.dispatchEvent("simple-restore-failed", { error: String(err) });
+    }
+
+    return result;
+  }
+
+  // ── Restore helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Parse the ZenTabs/ bookmark tree into an array of space folder descriptors.
+   * This is a pure read-only method — no browser state is modified.
+   *
+   * Each descriptor:
+   *   { name: string,
+   *     essentials: [{ containerName: string, items: [{title, url}] }],
+   *     pinned:     [DesiredItem] }
+   *
+   * DesiredItem is either:
+   *   { type: "bookmark", title, url }            ← root-level pinned tab
+   *   { type: "folder",   title, children: [...] } ← Zen folder (pinned tabs)
+   */
+  async _parseBookmarkTree(zenTabsGuid) {
+    const PlacesUtils = this.manager.window.PlacesUtils;
+    const tree = await PlacesUtils.promiseBookmarksTree(zenTabsGuid);
+    const spaceFolders = [];
+
+    for (const child of tree?.children ?? []) {
+      if (child.uri != null) continue;           // bare bookmarks at root — skip
+      if (child.title === "__spaces__") continue; // metadata folder — skip
+
+      const sf = { name: child.title, essentials: [], pinned: [] };
+      const spaceTree = await PlacesUtils.promiseBookmarksTree(child.guid);
+
+      for (const item of spaceTree?.children ?? []) {
+        if (item.uri != null) {
+          // Direct bookmark inside the space folder → root-level pinned tab.
+          sf.pinned.push({ type: "bookmark", title: item.title, url: item.uri });
+        } else if (this._isEssentialsFolder(item.title)) {
+          // Essentials sub-folder.
+          const efTree = await PlacesUtils.promiseBookmarksTree(item.guid);
+          const items = (efTree?.children ?? [])
+            .filter(c => c.uri != null)
+            .map(c => ({ title: c.title, url: c.uri }));
+          sf.essentials.push({ containerName: item.title, items });
+        } else {
+          // Named subfolder → Zen folder wrapping pinned tabs.
+          const sfTree = await PlacesUtils.promiseBookmarksTree(item.guid);
+          const folderNode = { type: "folder", title: item.title, children: [] };
+          for (const bm of sfTree?.children ?? []) {
+            if (bm.uri != null) {
+              folderNode.children.push({ type: "bookmark", title: bm.title, url: bm.uri });
+            }
+            // Sub-sub-folders (depth > 1) are not supported in this version.
+          }
+          sf.pinned.push(folderNode);
+        }
+      }
+
+      spaceFolders.push(sf);
+    }
+
+    return spaceFolders;
+  }
+
+  /**
+   * Build the deduplicated desired essential tab list across all space folders.
+   * Duplicates (same URL + same container name) across multiple spaces are
+   * collapsed into a single entry — essentials are shared across spaces.
+   *
+   * @returns {Array<{ url, title, containerName }>}
+   */
+  _buildDesiredEssentials(spaceFolders) {
+    const seen = new Set(); // key = `${url}::${containerName}`
+    const result = [];
+
+    for (const sf of spaceFolders) {
+      for (const ef of sf.essentials) {
+        for (const item of ef.items) {
+          const key = `${item.url}::${ef.containerName}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          result.push({ url: item.url, title: item.title, containerName: ef.containerName });
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Return true if a bookmark folder title represents a Zen essentials folder.
+   * Matches "Essentials" (default container) or "Essentials - <ContainerName>".
+   */
+  _isEssentialsFolder(title) {
+    return title === "Essentials" || title.startsWith("Essentials - ");
+  }
+
+  /**
+   * Find or create a Zen Space by name.
+   * Returns the workspace object (or a synthetic stub during dry-run).
+   */
+  async _findOrCreateSpace(name, spaceMetadata, dryRecord, result) {
+    const win = this.manager.window;
+    const existing = win.gZenWorkspaces?.getWorkspaces().find(ws => ws.name === name);
+    if (existing) return existing;
+
+    const meta  = spaceMetadata.get(name) ?? null;
+    const icon  = meta?.icon ?? null;
+    const theme = meta?.theme ?? {};
+
+    if (!dryRecord("created", "create-space", `Create space "${name}"`, { space: name })) {
+      // dry-run recorded — return synthetic stub so planning continues correctly.
+      return { uuid: `dry-run-uuid-${name}`, name, icon, theme, containerTabId: 0 };
+    }
+
+    // Live: actually create the space.
+    try {
+      const ws = await win.gZenWorkspaces.createAndSaveWorkspace(
+        name, icon, /* dontChange= */ true, 0
+      );
+      if (theme && Object.keys(theme).length > 0) {
+        ws.theme = theme;
+        await win.gZenWorkspaces.saveWorkspace(ws);
+      }
+      return ws;
+    } catch (e) {
+      result.errors.push(`create space "${name}": ${e.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Resolve an Essentials folder title to a Firefox container userContextId.
+   * "Essentials"           → 0  (default container)
+   * "Essentials - <Name>" → look up existing identity by name, or create one.
+   */
+  async _resolveContainerName(containerName) {
+    if (containerName === "Essentials") return 0;
+
+    const plainName = containerName.replace(/^Essentials - /, "");
+    const svc = this.manager.window.ContextualIdentityService;
+    if (!svc) return 0;
+
+    const identities = svc.getPublicIdentities?.() ?? [];
+    const found = identities.find(id => {
+      const label =
+        id.name ||
+        (id.l10nId
+          ? id.l10nId.replace(/^user-context-/, "").replace(/^./, c => c.toUpperCase())
+          : null);
+      return label === plainName;
+    });
+    if (found) return found.userContextId;
+
+    // No match — create a new container.
+    try {
+      const newIdentity = svc.create?.(plainName, "circle", "blue");
+      return newIdentity?.userContextId ?? 0;
+    } catch (e) {
+      this.log("Could not create container for", containerName, e);
+      return 0;
+    }
+  }
+
+  /**
+   * Reconcile essential tabs globally across all spaces.
+   * Creates missing ones, deletes stale ones.  Essential tabs are matched by
+   * (url, containerTabId) pairs.
+   */
+  async _reconcileEssentialTabs(desired, liveEssentials, dryRecord, result) {
+    const win     = this.manager.window;
+    const gBrowser = win.gBrowser;
+
+    // Resolve containerTabId for each desired entry.
+    const resolved = [];
+    for (const d of desired) {
+      const containerTabId = await this._resolveContainerName(d.containerName);
+      resolved.push({ ...d, containerTabId });
+    }
+
+    // Build a consumable pool of live essentials.
+    const livePool = liveEssentials.map(t => ({
+      tab:           t,
+      url:           this.getEssentialUrl(t) ?? "",
+      containerTabId: parseInt(t.getAttribute("usercontextid") ?? "0", 10),
+      matched:       false,
+    }));
+
+    // Match desired → live by (url, containerTabId).
+    for (const d of resolved) {
+      const idx = livePool.findIndex(
+        lp => !lp.matched && lp.url === d.url && lp.containerTabId === d.containerTabId
+      );
+      if (idx !== -1) {
+        livePool[idx].matched = true;
+      } else {
+        const desc = `Create essential tab "${d.title}" (${d.url}) [container: ${d.containerName}]`;
+        if (dryRecord("created", "create-tab", desc, { url: d.url, title: d.title, container: d.containerName })) {
+          try {
+            const tab = gBrowser.addTrustedTab(d.url, {
+              createLazyBrowser: true,
+              lazyTabTitle:      d.title,
+              skipAnimation:     true,
+              userContextId:     d.containerTabId,
+              triggeringPrincipal:
+                win.Services?.scriptSecurityManager?.getSystemPrincipal?.(),
+            });
+            tab.setAttribute("zen-essential", "true");
+            if (win.gZenPinnedTabManager?.addToEssentials) {
+              win.gZenPinnedTabManager.addToEssentials(tab);
+            } else if (!tab.pinned) {
+              gBrowser.pinTab(tab);
+            }
+            result.created++;
+          } catch (e) {
+            result.errors.push(`create essential tab ${d.url}: ${e.message}`);
+          }
+        }
+      }
+    }
+
+    // Delete unmatched live essentials.
+    for (const lp of livePool) {
+      if (lp.matched) continue;
+      const desc = `Delete essential tab "${lp.url}" [container: ${lp.containerTabId}]`;
+      if (dryRecord("deleted", "delete-tab", desc, { url: lp.url })) {
+        try {
+          gBrowser.removeTab(lp.tab, { skipPermitUnload: true });
+          result.deleted++;
+        } catch (e) {
+          result.errors.push(`delete essential tab ${lp.url}: ${e.message}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Reconcile pinned tabs for one space.
+   *
+   * sf          — parsed space descriptor { name, pinned: [DesiredItem] }
+   * ws          — Zen workspace object
+   * livePinned  — live pinned tabs currently in this space
+   */
+  async _reconcilePinnedTabsForSpace(sf, ws, livePinned, dryRecord, result) {
+    const win          = this.manager.window;
+    const gBrowser     = win.gBrowser;
+    const gZenWorkspaces = win.gZenWorkspaces;
+    const gZenFolders  = win.gZenFolders;
+
+    // Build a consumable pool of live pinned tabs in this space.
+    const livePool = livePinned.map(t => ({
+      tab:        t,
+      url:        this.getPinnedUrl(t) ?? "",
+      folderLabel: (t.group?.isZenFolder) ? (t.group.label ?? null) : null,
+      matched:    false,
+    }));
+
+    const desiredRoot   = sf.pinned.filter(item => item.type === "bookmark");
+    const desiredFolders = sf.pinned.filter(item => item.type === "folder");
+
+    // ── Root-level pinned tabs ─────────────────────────────────────────
+    for (const desired of desiredRoot) {
+      if (!desired.url || this._isBlankUrl(desired.url)) continue;
+
+      const idx = livePool.findIndex(
+        lp => !lp.matched && lp.url === desired.url && !lp.folderLabel
+      );
+      if (idx !== -1) {
+        livePool[idx].matched = true;
+      } else {
+        const desc =
+          `Create pinned tab "${desired.title}" (${desired.url}) in space "${sf.name}" [root]`;
+        if (dryRecord("created", "create-tab", desc,
+          { url: desired.url, title: desired.title, space: sf.name })) {
+          // live path
+          try {
+            const tab = gBrowser.addTrustedTab(desired.url, {
+              createLazyBrowser: true,
+              lazyTabTitle:      desired.title,
+              skipAnimation:     true,
+              triggeringPrincipal:
+                win.Services?.scriptSecurityManager?.getSystemPrincipal?.(),
+            });
+            tab.setAttribute("zen-workspace-id", ws.uuid);
+            gBrowser.pinTab(tab);
+            gZenWorkspaces.moveTabToWorkspace(tab, ws.uuid);
+            result.created++;
+          } catch (e) {
+            result.errors.push(`create pinned tab ${desired.url}: ${e.message}`);
+          }
+        }
+      }
+    }
+
+    // ── Zen-folder pinned tabs ─────────────────────────────────────────
+    for (const folder of desiredFolders) {
+      const folderBms = (folder.children ?? []).filter(
+        bm => bm.url && !this._isBlankUrl(bm.url)
+      );
+      if (folderBms.length === 0) continue;
+
+      const toCreate = [];
+      for (const bm of folderBms) {
+        const idx = livePool.findIndex(
+          lp => !lp.matched && lp.url === bm.url && lp.folderLabel === folder.title
+        );
+        if (idx !== -1) {
+          livePool[idx].matched = true;
+        } else {
+          toCreate.push(bm);
+        }
+      }
+
+      if (toCreate.length === 0) continue;
+
+      const desc = `Create Zen folder "${folder.title}" with ${toCreate.length} tab(s) in space "${sf.name}"`;
+      const executing = dryRecord("created", "create-zen-folder", desc,
+        { folder: folder.title, space: sf.name });
+      if (executing) {
+        try {
+          // Look for an existing folder with this name in this workspace.
+          const allLiveTabs = gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
+          let existingFolder = null;
+          for (const lt of allLiveTabs) {
+            if (
+              lt.getAttribute("zen-workspace-id") === ws.uuid &&
+              lt.group?.isZenFolder &&
+              lt.group.label === folder.title
+            ) {
+              existingFolder = lt.group;
+              break;
+            }
+          }
+
+          if (existingFolder) {
+            // Folder exists — insert new tabs into it.
+            for (const bm of toCreate) {
+              const tab = gBrowser.addTrustedTab(bm.url, {
+                createLazyBrowser: true,
+                lazyTabTitle:      bm.title,
+                skipAnimation:     true,
+                triggeringPrincipal:
+                  win.Services?.scriptSecurityManager?.getSystemPrincipal?.(),
+              });
+              tab.setAttribute("zen-workspace-id", ws.uuid);
+              gBrowser.pinTab(tab);
+              existingFolder.addTabs([tab]);
+              result.created++;
+            }
+          } else {
+            // Create new tabs and wrap them in a new Zen folder.
+            const newTabs = [];
+            for (const bm of toCreate) {
+              const tab = gBrowser.addTrustedTab(bm.url, {
+                createLazyBrowser: true,
+                lazyTabTitle:      bm.title,
+                skipAnimation:     true,
+                triggeringPrincipal:
+                  win.Services?.scriptSecurityManager?.getSystemPrincipal?.(),
+              });
+              tab.setAttribute("zen-workspace-id", ws.uuid);
+              newTabs.push(tab);
+            }
+            if (gZenFolders?.createFolder) {
+              gZenFolders.createFolder(newTabs, {
+                label:       folder.title,
+                workspaceId: ws.uuid,
+              });
+            } else {
+              // Fallback: pin each tab and assign to workspace.
+              for (const tab of newTabs) {
+                gBrowser.pinTab(tab);
+                gZenWorkspaces.moveTabToWorkspace(tab, ws.uuid);
+              }
+            }
+            result.created += toCreate.length;
+          }
+        } catch (e) {
+          result.errors.push(`create folder "${folder.title}": ${e.message}`);
+        }
+      } else if (toCreate.length > 1) {
+        // Dry-run: dryRecord already counting +1 for the folder entry;
+        // increment for the remaining tabs so the total matches reality.
+        result.created += toCreate.length - 1;
+      }
+    }
+
+    // ── Delete unmatched live pinned tabs in this space ────────────────
+    for (const lp of livePool) {
+      if (lp.matched) continue;
+      const desc = `Delete pinned tab "${lp.url}" from space "${sf.name}"`;
+      if (dryRecord("deleted", "delete-tab", desc, { url: lp.url, space: sf.name })) {
+        try {
+          gBrowser.removeTab(lp.tab, { skipPermitUnload: true });
+          result.deleted++;
+        } catch (e) {
+          result.errors.push(`delete pinned tab ${lp.url}: ${e.message}`);
+        }
+      }
+    }
+  }
+
   /**
    * Read back space metadata from the __spaces__/ bookmark folder.
    * Returns Map<name, { icon, theme }>.  Returns empty Map on any error.

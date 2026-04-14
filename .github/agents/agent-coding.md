@@ -75,4 +75,5 @@ All approved and implemented specifications live in `specs/`:
 |---|---|---|
 | `specs/SimpleBookmarkSync.spec.md` | One-way tab-to-bookmark sync (`SimpleBookmarkSyncManager`) | Implemented |
 | `specs/SpaceMetadataSync.spec.md` | Space icon/theme metadata in bookmarks + rename detection | Implemented — 2026-04-14 |
+| `specs/BookmarksToTabsSync.spec.md` | Reverse sync: bookmarks → tabs with dry-run mode | Implemented — 2026-04-14 |
 

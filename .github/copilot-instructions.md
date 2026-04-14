@@ -91,6 +91,10 @@ Core events:
 | `tabs-auto-unloaded` | Idle-tab unload pass finished |
 | `paused` | Manager was paused |
 | `resumed` | Manager was resumed |
+| `simple-restore-started` | `syncBookmarksToTabs` call began |
+| `simple-restore-completed` | Restore succeeded (live run) |
+| `simple-restore-dry-run-completed` | Dry-run planning pass finished |
+| `simple-restore-failed` | Restore threw an error |
 
 ### Zen Spaces (Workspaces)
 
@@ -228,6 +232,14 @@ ZenTabsAPI.resume()
 ZenTabsAPI.isPaused()
 ```
 
+### SimpleBookmarkSyncManager API (direct access)
+
+```javascript
+await ZenTabsManager.simpleBookmarkSyncManager.syncTabsToBookmarks()
+await ZenTabsManager.simpleBookmarkSyncManager.syncBookmarksToTabs()            // restore bookmarks → tabs (live)
+await ZenTabsManager.simpleBookmarkSyncManager.syncBookmarksToTabs({ dryRun: true }) // preview without mutations
+```
+
 ## Manifest (`theme.json`)
 
 ```json
@@ -267,6 +279,7 @@ All approved feature specs live in the `specs/` directory. Consult the relevant 
 |---|---|---|
 | `specs/SimpleBookmarkSync.spec.md` | One-way tab-to-bookmark sync (`SimpleBookmarkSyncManager`) | Approved — ready for implementation |
 | `specs/SpaceMetadataSync.spec.md` | Space icon/theme metadata in bookmarks + rename detection | Implemented — 2026-04-14 |
+| `specs/BookmarksToTabsSync.spec.md` | Reverse sync: bookmarks → tabs with dry-run mode | Implemented — 2026-04-14 |
 
 ---
 

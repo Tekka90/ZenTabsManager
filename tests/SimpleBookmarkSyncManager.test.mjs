@@ -748,3 +748,373 @@ describe("rename detection — _jaccard helper", () => {
     assert.equal(sm._jaccard(new Set(["a","b"]), new Set(["a","b","c","d"])), 0.5);
   });
 });
+
+// ── _isEssentialsFolder ───────────────────────────────────────────────────
+
+describe("_isEssentialsFolder", () => {
+  const sm = new SimpleBookmarkSyncManager(makeManager());
+
+  test("returns true for 'Essentials'", () => {
+    assert.ok(sm._isEssentialsFolder("Essentials"));
+  });
+
+  test("returns true for 'Essentials - Work'", () => {
+    assert.ok(sm._isEssentialsFolder("Essentials - Work"));
+  });
+
+  test("returns true for 'Essentials - My Container'", () => {
+    assert.ok(sm._isEssentialsFolder("Essentials - My Container"));
+  });
+
+  test("returns false for 'Dev Tools'", () => {
+    assert.ok(!sm._isEssentialsFolder("Dev Tools"));
+  });
+
+  test("returns false for 'Temporary tabs'", () => {
+    assert.ok(!sm._isEssentialsFolder("Temporary tabs"));
+  });
+
+  test("returns false for empty string", () => {
+    assert.ok(!sm._isEssentialsFolder(""));
+  });
+});
+
+// ── _buildDesiredEssentials ───────────────────────────────────────────────
+
+describe("_buildDesiredEssentials", () => {
+  const sm = new SimpleBookmarkSyncManager(makeManager());
+
+  test("returns empty array when no essentials anywhere", () => {
+    const result = sm._buildDesiredEssentials([
+      { name: "Work", essentials: [], pinned: [] },
+    ]);
+    assert.deepEqual(result, []);
+  });
+
+  test("returns items from a single essentials folder", () => {
+    const result = sm._buildDesiredEssentials([{
+      name: "Work",
+      essentials: [{
+        containerName: "Essentials",
+        items: [{ url: "https://a.com", title: "A" }],
+      }],
+      pinned: [],
+    }]);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].url, "https://a.com");
+    assert.equal(result[0].containerName, "Essentials");
+  });
+
+  test("deduplicates identical url+containerName across two spaces", () => {
+    const entry = { url: "https://a.com", title: "A" };
+    const result = sm._buildDesiredEssentials([
+      { name: "Work",     essentials: [{ containerName: "Essentials", items: [entry] }], pinned: [] },
+      { name: "Personal", essentials: [{ containerName: "Essentials", items: [entry] }], pinned: [] },
+    ]);
+    assert.equal(result.length, 1, "duplicate across spaces must be collapsed");
+  });
+
+  test("keeps same URL in different containers as separate entries", () => {
+    const result = sm._buildDesiredEssentials([{
+      name: "Work",
+      essentials: [
+        { containerName: "Essentials",        items: [{ url: "https://a.com", title: "A" }] },
+        { containerName: "Essentials - Work", items: [{ url: "https://a.com", title: "A" }] },
+      ],
+      pinned: [],
+    }]);
+    assert.equal(result.length, 2, "same URL in different containers = separate entries");
+  });
+
+  test("keeps distinct URLs as separate entries", () => {
+    const result = sm._buildDesiredEssentials([{
+      name: "Work",
+      essentials: [{
+        containerName: "Essentials",
+        items: [
+          { url: "https://a.com", title: "A" },
+          { url: "https://b.com", title: "B" },
+        ],
+      }],
+      pinned: [],
+    }]);
+    assert.equal(result.length, 2);
+  });
+});
+
+// ── _parseBookmarkTree ────────────────────────────────────────────────────
+
+/**
+ * Build a minimal bookmark store for _parseBookmarkTree tests.
+ * Returns { sm, zenTabsGuid } — the sync manager and the guid of ZenTabs/.
+ *
+ * Tree shape produced:
+ *   ZenTabs/                   guid: "zt"
+ *   └── Work/                  guid: "ws-work"
+ *       ├── Essentials/        guid: "ess-work"
+ *       │   └── mail.com       guid: "bm-mail",  uri: "https://mail.com"
+ *       ├── https://gh.com     guid: "bm-gh"  (direct bookmark = root pinned)
+ *       └── Dev/               guid: "folder-dev"
+ *           └── https://vs.com guid: "bm-vs"
+ */
+function makeSyncManagerForParseTree() {
+  const mgr = makeManager();
+  const store = mgr.window.PlacesUtils.bookmarks._store;
+
+  // Clear the default toolbar entry and seed our own tree.
+  store.clear();
+  store.set("zt",          { guid: "zt",          parentGuid: null,      type: "folder",   title: "ZenTabs",    url: null });
+  store.set("ws-work",     { guid: "ws-work",      parentGuid: "zt",      type: "folder",   title: "Work",       url: null });
+  store.set("ess-work",    { guid: "ess-work",     parentGuid: "ws-work", type: "folder",   title: "Essentials", url: null });
+  store.set("bm-mail",     { guid: "bm-mail",      parentGuid: "ess-work",type: "bookmark", title: "Mail",       url: "https://mail.com" });
+  store.set("bm-gh",       { guid: "bm-gh",        parentGuid: "ws-work", type: "bookmark", title: "GitHub",     url: "https://gh.com" });
+  store.set("folder-dev",  { guid: "folder-dev",   parentGuid: "ws-work", type: "folder",   title: "Dev",        url: null });
+  store.set("bm-vs",       { guid: "bm-vs",        parentGuid: "folder-dev", type: "bookmark", title: "VSCode", url: "https://vs.com" });
+
+  return { sm: new SimpleBookmarkSyncManager(mgr), zenTabsGuid: "zt" };
+}
+
+describe("_parseBookmarkTree", () => {
+  test("returns one space descriptor per top-level folder (skipping __spaces__)", async () => {
+    const { sm, zenTabsGuid } = makeSyncManagerForParseTree();
+    const spaces = await sm._parseBookmarkTree(zenTabsGuid);
+    assert.equal(spaces.length, 1);
+    assert.equal(spaces[0].name, "Work");
+  });
+
+  test("skips __spaces__ folder", async () => {
+    const { sm, zenTabsGuid } = makeSyncManagerForParseTree();
+    const store = sm.manager.window.PlacesUtils.bookmarks._store;
+    store.set("meta", { guid: "meta", parentGuid: "zt", type: "folder", title: "__spaces__", url: null });
+    const spaces = await sm._parseBookmarkTree(zenTabsGuid);
+    assert.ok(!spaces.find(s => s.name === "__spaces__"), "__spaces__ must be excluded");
+  });
+
+  test("essentials folder is parsed correctly", async () => {
+    const { sm, zenTabsGuid } = makeSyncManagerForParseTree();
+    const spaces = await sm._parseBookmarkTree(zenTabsGuid);
+    const work = spaces[0];
+    assert.equal(work.essentials.length, 1);
+    assert.equal(work.essentials[0].containerName, "Essentials");
+    assert.equal(work.essentials[0].items.length, 1);
+    assert.equal(work.essentials[0].items[0].url, "https://mail.com");
+    assert.equal(work.essentials[0].items[0].title, "Mail");
+  });
+
+  test("direct bookmark in space folder → root-level pinned", async () => {
+    const { sm, zenTabsGuid } = makeSyncManagerForParseTree();
+    const spaces = await sm._parseBookmarkTree(zenTabsGuid);
+    const work = spaces[0];
+    const rootPinned = work.pinned.filter(i => i.type === "bookmark");
+    assert.equal(rootPinned.length, 1);
+    assert.equal(rootPinned[0].url, "https://gh.com");
+    assert.equal(rootPinned[0].title, "GitHub");
+  });
+
+  test("named subfolder → Zen folder descriptor", async () => {
+    const { sm, zenTabsGuid } = makeSyncManagerForParseTree();
+    const spaces = await sm._parseBookmarkTree(zenTabsGuid);
+    const work = spaces[0];
+    const folders = work.pinned.filter(i => i.type === "folder");
+    assert.equal(folders.length, 1);
+    assert.equal(folders[0].title, "Dev");
+    assert.equal(folders[0].children.length, 1);
+    assert.equal(folders[0].children[0].url, "https://vs.com");
+  });
+
+  test("empty ZenTabs folder returns empty array", async () => {
+    const mgr   = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    store.set("zt-empty", { guid: "zt-empty", parentGuid: null, type: "folder", title: "ZenTabs", url: null });
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const spaces = await sm._parseBookmarkTree("zt-empty");
+    assert.deepEqual(spaces, []);
+  });
+});
+
+// ── _resolveContainerName ────────────────────────────────────────────────
+
+describe("_resolveContainerName", () => {
+  test("'Essentials' resolves to 0 (default container)", async () => {
+    const sm = new SimpleBookmarkSyncManager(makeManager());
+    assert.equal(await sm._resolveContainerName("Essentials"), 0);
+  });
+
+  test("'Essentials - Work' resolves existing identity by name", async () => {
+    const mgr = makeManager();
+    // Pre-seed a container named "Work"
+    mgr.window.ContextualIdentityService.create("Work", "circle", "blue");
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const id = await sm._resolveContainerName("Essentials - Work");
+    assert.equal(typeof id, "number");
+    assert.ok(id > 0, "should return the userContextId for the Work container");
+  });
+
+  test("'Essentials - New' creates a new container when not found", async () => {
+    const mgr = makeManager();
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const idBefore = mgr.window.ContextualIdentityService.getPublicIdentities().length;
+    const id = await sm._resolveContainerName("Essentials - New");
+    const idAfter = mgr.window.ContextualIdentityService.getPublicIdentities().length;
+    assert.equal(idAfter, idBefore + 1, "a new container should be created");
+    assert.ok(id > 0);
+  });
+
+  test("returns 0 when ContextualIdentityService is unavailable", async () => {
+    const mgr = makeManager();
+    delete mgr.window.ContextualIdentityService;
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm._resolveContainerName("Essentials - Anything");
+    assert.equal(result, 0);
+  });
+});
+
+// ── syncBookmarksToTabs — dry-run ─────────────────────────────────────────
+
+describe("syncBookmarksToTabs — dry-run", () => {
+  function makeSyncManagerWithTree() {
+    const mgr   = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    // Toolbar → ZenTabs/ → Work/ → Essentials/ → mail.com
+    //                             → GitHub (direct = pinned)
+    store.set("toolbar",  { guid: "toolbar",  parentGuid: null,      type: "folder",   title: "Bookmarks Toolbar", url: null });
+    store.set("zt",       { guid: "zt",       parentGuid: "toolbar", type: "folder",   title: "ZenTabs",          url: null });
+    store.set("ws-work",  { guid: "ws-work",  parentGuid: "zt",      type: "folder",   title: "Work",             url: null });
+    store.set("ess-work", { guid: "ess-work", parentGuid: "ws-work", type: "folder",   title: "Essentials",       url: null });
+    store.set("bm-mail",  { guid: "bm-mail",  parentGuid: "ess-work",type: "bookmark", title: "Mail",             url: "https://mail.com" });
+    store.set("bm-gh",    { guid: "bm-gh",    parentGuid: "ws-work", type: "bookmark", title: "GitHub",           url: "https://gh.com" });
+    // Space "Work" already exists in gZenWorkspaces so no space creation needed.
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      [] // no live tabs
+    );
+    return new SimpleBookmarkSyncManager(mgr);
+  }
+
+  test("result has plan array when dryRun:true", async () => {
+    const sm = makeSyncManagerWithTree();
+    const result = await sm.syncBookmarksToTabs({ dryRun: true });
+    assert.ok(Array.isArray(result.plan), "plan must be an array");
+    assert.ok(result.errors.length === 0, "no errors expected");
+  });
+
+  test("created count matches number of tabs that would be created", async () => {
+    const sm = makeSyncManagerWithTree();
+    const result = await sm.syncBookmarksToTabs({ dryRun: true });
+    // 1 essential tab (mail.com) + 1 pinned tab (gh.com) = 2
+    assert.equal(result.created, 2);
+  });
+
+  test("deleted count is 0 when no live tabs exist", async () => {
+    const sm = makeSyncManagerWithTree();
+    const result = await sm.syncBookmarksToTabs({ dryRun: true });
+    assert.equal(result.deleted, 0);
+  });
+
+  test("plan entries contain required action field", async () => {
+    const sm = makeSyncManagerWithTree();
+    const result = await sm.syncBookmarksToTabs({ dryRun: true });
+    for (const entry of result.plan) {
+      assert.ok(typeof entry.action === "string", "each plan entry must have an action");
+      assert.ok(typeof entry.description === "string", "each plan entry must have a description");
+    }
+  });
+
+  test("no browser tabs are created during dry-run", async () => {
+    const sm = makeSyncManagerWithTree();
+    const tabsBefore = sm.manager.window.gBrowser.tabs.length;
+    await sm.syncBookmarksToTabs({ dryRun: true });
+    assert.equal(sm.manager.window.gBrowser.tabs.length, tabsBefore, "no tabs must be created");
+  });
+
+  test("stops gracefully when ZenTabs/ folder does not exist", async () => {
+    const mgr   = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    store.set("toolbar", { guid: "toolbar", parentGuid: null, type: "folder", title: "Bookmarks Toolbar", url: null });
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs({ dryRun: true });
+    assert.equal(result.created, 0);
+    assert.equal(result.plan?.length, 0);
+  });
+});
+
+// ── syncBookmarksToTabs — live (tab creation) ─────────────────────────────
+
+describe("syncBookmarksToTabs — live", () => {
+  function makeSyncManagerWithTree() {
+    const mgr   = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    store.set("toolbar",  { guid: "toolbar",  parentGuid: null,      type: "folder",   title: "Bookmarks Toolbar", url: null });
+    store.set("zt",       { guid: "zt",       parentGuid: "toolbar", type: "folder",   title: "ZenTabs",          url: null });
+    store.set("ws-work",  { guid: "ws-work",  parentGuid: "zt",      type: "folder",   title: "Work",             url: null });
+    store.set("ess-work", { guid: "ess-work", parentGuid: "ws-work", type: "folder",   title: "Essentials",       url: null });
+    store.set("bm-mail",  { guid: "bm-mail",  parentGuid: "ess-work",type: "bookmark", title: "Mail",             url: "https://mail.com" });
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      []
+    );
+    return mgr;
+  }
+
+  test("creates an essential tab for a bookmark in Essentials/", async () => {
+    const mgr = makeSyncManagerWithTree();
+    const sm  = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs();
+    assert.equal(result.created, 1);
+    assert.equal(result.errors.length, 0);
+    // The tab should have been added
+    const tabs = mgr.window.gBrowser.tabs;
+    const essTab = tabs.find(t => t.linkedBrowser.currentURI.spec === "https://mail.com");
+    assert.ok(essTab, "essential tab should be created");
+  });
+
+  test("marks new tab as essential via gZenPinnedTabManager.addToEssentials", async () => {
+    const mgr = makeSyncManagerWithTree();
+    const sm  = new SimpleBookmarkSyncManager(mgr);
+    await sm.syncBookmarksToTabs();
+    const calls = mgr.window.gZenPinnedTabManager.addToEssentialsCalls;
+    assert.ok(calls.length >= 1, "addToEssentials must be called");
+    assert.ok(calls[0].hasAttribute("zen-essential"), "tab must have zen-essential attribute");
+  });
+
+  test("deletes a live essential tab that has no matching bookmark", async () => {
+    const mgr = makeSyncManagerWithTree();
+    // Add a stale essential tab not in bookmarks
+    const staleTab = makeTab({
+      url: "https://stale.com",
+      pinned: true,
+      attrs: { "zen-essential": "", "zen-workspace-id": "uuid-work" },
+    });
+    mgr.window.gBrowser.tabs.push(staleTab);
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      [staleTab]
+    );
+    mgr.window.gZenWorkspaces._allStoredTabs = [staleTab];
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs();
+    assert.equal(result.deleted, 1);
+  });
+
+  test("does not re-create an essential tab that already exists", async () => {
+    const mgr = makeSyncManagerWithTree();
+    // Pre-create the tab in live state
+    const existingTab = makeTab({
+      url: "https://mail.com",
+      pinned: true,
+      attrs: { "zen-essential": "", "usercontextid": "0" },
+    });
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      [existingTab]
+    );
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs();
+    assert.equal(result.created, 0, "existing essential tab must not be duplicated");
+  });
+});

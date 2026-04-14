@@ -181,6 +181,14 @@ export function makeGBrowser(tabs = []) {
       openTabs.push(tab);
       return tab;
     },
+    addTrustedTab(url, opts) {
+      addTabCalls.push({ url, opts: { ...opts, trusted: true } });
+      const tab = makeTab({ url, lastAccessed: Date.now() });
+      if (opts?.userContextId !== undefined) tab.setAttribute("usercontextid", String(opts.userContextId));
+      if (opts?.lazyTabTitle) tab.setAttribute("label", opts.lazyTabTitle);
+      openTabs.push(tab);
+      return tab;
+    },
     removeTab(tab) {
       const idx = openTabs.indexOf(tab);
       if (idx !== -1) openTabs.splice(idx, 1);
@@ -364,6 +372,14 @@ export function makeManager({
   const gZenWorkspaces = makeGZenWorkspaces(workspaces, tabs);
   const gZenFolders    = makeGZenFolders();
   const ContextualIdentityService = makeContextualIdentityService();
+  const gZenPinnedTabManager = {
+    addToEssentialsCalls: [],
+    addToEssentials(tab) {
+      tab.setAttribute("zen-essential", "true");
+      tab.pinned = true;
+      this.addToEssentialsCalls.push(tab);
+    },
+  };
   const ioUtils   = makeIOUtils();
   const pathUtils = makePathUtils();
 
@@ -404,6 +420,7 @@ export function makeManager({
       gBrowser,
       gZenWorkspaces,
       gZenFolders,
+      gZenPinnedTabManager,
       ContextualIdentityService,
       Services,
       setInterval:   (fn, ms) => null,
