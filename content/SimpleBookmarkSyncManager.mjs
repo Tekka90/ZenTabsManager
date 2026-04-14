@@ -25,7 +25,8 @@ export class SimpleBookmarkSyncManager {
    */
   async syncTabsToBookmarks() {
     this.manager.dispatchEvent("simple-sync-started", {});
-    const result = { created: 0, updated: 0, deleted: 0, errors: [] };
+    const result = { created: 0, updated: 0, deleted: 0, errors: [],
+      details: { titleUpdates: 0, reorders: 0, metadataUpdates: 0, folderCreates: 0, bookmarkCreates: 0 } };
 
     try {
       const PlacesUtils = this.manager.window.PlacesUtils;
@@ -58,7 +59,8 @@ export class SimpleBookmarkSyncManager {
       await this._syncSpaceMetadata(rootGuid, syncedSpaces, result);
 
       this.log(
-        `Sync complete — created:${result.created} updated:${result.updated} deleted:${result.deleted}`
+        `Sync complete — created:${result.created} updated:${result.updated} deleted:${result.deleted}`,
+        `| breakdown: titleUpdates=${result.details.titleUpdates} reorders=${result.details.reorders} metadataUpdates=${result.details.metadataUpdates}`
       );
       this.manager.dispatchEvent("simple-sync-completed", {
         created: result.created,
@@ -387,6 +389,7 @@ export class SimpleBookmarkSyncManager {
             title: desired.title,
           });
           result.updated++;
+          result.details.titleUpdates++;
         } catch (e) {
           result.errors.push(`update title ${existing.guid}: ${e.message}`);
         }
@@ -403,6 +406,7 @@ export class SimpleBookmarkSyncManager {
         url: desired.url,
       });
       result.created++;
+      result.details.bookmarkCreates++;
       return bm.guid;
     } catch (e) {
       result.errors.push(`create bookmark ${desired.url}: ${e.message}`);
@@ -436,6 +440,7 @@ export class SimpleBookmarkSyncManager {
           title: desired.title,
         });
         result.created++;
+        result.details.folderCreates++;
         folderGuid = folder.guid;
       } catch (e) {
         result.errors.push(`create folder ${desired.title}: ${e.message}`);
@@ -471,6 +476,7 @@ export class SimpleBookmarkSyncManager {
         try {
           await PlacesUtils.bookmarks.update({ guid, parentGuid, index: i });
           result.updated++;
+          result.details.reorders++;
         } catch (e) {
           result.errors.push(`reorder ${guid}: ${e.message}`);
         }
@@ -734,6 +740,7 @@ export class SimpleBookmarkSyncManager {
           try {
             await PlacesUtils.bookmarks.update({ guid: existing_.guid, url: encoded });
             result.updated++;
+            result.details.metadataUpdates++;
           } catch (e) {
             result.errors.push(`update metadata ${space.name}: ${e.message}`);
           }
