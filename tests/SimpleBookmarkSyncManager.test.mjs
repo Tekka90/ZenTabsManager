@@ -602,6 +602,33 @@ describe("space metadata — T5: readSpaceMetadata returns empty Map when no fol
   });
 });
 
+describe("space metadata — containerTabId round-trips through metadata", () => {
+  test("containerTabId is stored and read back correctly", async () => {
+    const ws  = makeWorkspace("Work");
+    ws.containerTabId = 3;
+    const tab = makeEssentialTab("https://work.com", 3, ws.uuid, { label: "Work" });
+    const sm  = makeSyncManager([ws], [tab]);
+
+    await sm.syncTabsToBookmarks();
+
+    const meta   = await sm.readSpaceMetadata();
+    const parsed = meta.get("Work");
+    assert.equal(parsed.containerTabId, 3, "containerTabId must round-trip");
+  });
+
+  test("containerTabId defaults to 0 when absent", async () => {
+    const ws  = makeWorkspace("Default");
+    const tab = makeEssentialTab("https://home.com", 0, ws.uuid, { label: "Home" });
+    const sm  = makeSyncManager([ws], [tab]);
+
+    await sm.syncTabsToBookmarks();
+
+    const meta   = await sm.readSpaceMetadata();
+    const parsed = meta.get("Default");
+    assert.equal(parsed.containerTabId, 0);
+  });
+});
+
 describe("space metadata — T6: theme survives JSON round-trip", () => {
   test("deeply nested theme object is preserved exactly", async () => {
     const ws  = makeWorkspace("Design");
@@ -1499,6 +1526,9 @@ describe("syncBookmarksToTabs — second run idempotency", () => {
     // Simulate the browser having these tabs live for the second run:
     // allStoredTabs must include the tabs created by the first run.
     const tabs = mgr.window.gBrowser.tabs;
+    // Simulate inactive space: tab.group is null (Zen hasn't initialized
+    // the folder structure yet), so matching must use zentabs-folder-path.
+    for (const t of tabs) t.group = null;
     mgr.window.gZenWorkspaces.allStoredTabs = [...tabs];
 
     // Second run: should be a no-op (all tabs already exist).
@@ -1537,11 +1567,15 @@ describe("syncBookmarksToTabs — second run idempotency", () => {
     const foldersAfterRun1 = mgr.window.gZenFolders._createdFolders.length;
 
     // Set up for second run.
+    // Simulate inactive space: nullify tab.group so matching must use
+    // zentabs-folder-path attribute.
+    for (const t of mgr.window.gBrowser.tabs) t.group = null;
     mgr.window.gZenWorkspaces.allStoredTabs = [...mgr.window.gBrowser.tabs];
 
-    // Second run: folderRef must be found via chain walk (tab.group.group).
+    // Second run: folderRef must be found via zentabs-folder-path fallback.
     const r2 = await sm.syncBookmarksToTabs();
     assert.equal(r2.created, 0, "second run must not create anything");
+    assert.equal(r2.deleted, 0, "second run must not delete anything");
 
     assert.equal(mgr.window.gZenFolders._createdFolders.length, foldersAfterRun1,
       "no new folders created on second run");

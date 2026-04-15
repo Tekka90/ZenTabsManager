@@ -55,6 +55,7 @@ export class SimpleBookmarkSyncManager {
         name: ws.name,
         icon: ws.icon ?? null,
         theme: ws.theme ?? {},
+        containerTabId: ws.containerTabId ?? 0,
       }));
       await this._syncSpaceMetadata(rootGuid, syncedSpaces, result);
 
@@ -796,8 +797,8 @@ export class SimpleBookmarkSyncManager {
   /**
    * Encode space metadata as a data: URI containing URL-encoded JSON.
    */
-  _encodeSpaceMetadata({ name, icon, theme }) {
-    const payload = { v: 1, name, icon: icon ?? null, theme: theme ?? {} };
+  _encodeSpaceMetadata({ name, icon, theme, containerTabId }) {
+    const payload = { v: 1, name, icon: icon ?? null, theme: theme ?? {}, containerTabId: containerTabId ?? 0 };
     return "data:application/json," + encodeURIComponent(JSON.stringify(payload));
   }
 
@@ -891,6 +892,10 @@ export class SimpleBookmarkSyncManager {
         `desired: ${desiredEssentials.length}, live: ${liveEssentials.length}`,
         desiredEssentials.length ? desiredEssentials.map(d => d.url) : ""
       );
+      // Debug: log each live essential's state.
+      for (const t of liveEssentials) {
+        this.log(`  live essential: url="${this.getEssentialUrl(t)}" pinned=${t.pinned} zen-essential=${t.hasAttribute("zen-essential")}`);
+      }
 
       // 7. Reconcile essential tabs globally.
       await this._reconcileEssentialTabs(
@@ -1053,16 +1058,17 @@ export class SimpleBookmarkSyncManager {
     const meta  = spaceMetadata.get(name) ?? null;
     const icon  = meta?.icon ?? null;
     const theme = meta?.theme ?? {};
+    const containerTabId = meta?.containerTabId ?? 0;
 
     if (!dryRecord("created", "create-space", `Create space "${name}"`, { space: name })) {
       // dry-run recorded — return synthetic stub so planning continues correctly.
-      return { uuid: `dry-run-uuid-${name}`, name, icon, theme, containerTabId: 0 };
+      return { uuid: `dry-run-uuid-${name}`, name, icon, theme, containerTabId };
     }
 
     // Live: actually create the space.
     try {
       const ws = await win.gZenWorkspaces.createAndSaveWorkspace(
-        name, icon, /* dontChange= */ true, 0
+        name, icon, /* dontChange= */ true, containerTabId
       );
       if (theme && Object.keys(theme).length > 0) {
         ws.theme = theme;
@@ -1217,12 +1223,20 @@ export class SimpleBookmarkSyncManager {
     const gZenWorkspaces = win.gZenWorkspaces;
 
     // Build a consumable pool of live pinned tabs in this space.
-    const livePool = livePinned.map(t => ({
-      tab:        t,
-      url:        this.getPinnedUrl(t) ?? "",
-      folderLabel: (t.group?.isZenFolder) ? (t.group.label ?? null) : null,
-      matched:    false,
-    }));
+    // Use _getTabFolderPath to resolve folder labels — tab.group is null
+    // for tabs in inactive spaces, so the zentabs-folder-path attribute
+    // must be checked as a fallback.
+    const livePool = livePinned.map(t => {
+      const folderPath = this._getTabFolderPath(t);
+      // The immediate (innermost) folder label for matching.
+      const folderLabel = folderPath ? folderPath[folderPath.length - 1] : null;
+      return {
+        tab:         t,
+        url:         this.getPinnedUrl(t) ?? "",
+        folderLabel,
+        matched:     false,
+      };
+    });
 
     // Process pinned items in bookmark order (preserving interleaved
     // bookmarks and folders so tabs/folders appear in the correct order).
@@ -1262,7 +1276,7 @@ export class SimpleBookmarkSyncManager {
         }
       } else if (item.type === "folder") {
         await this._reconcileFolderRecursive(
-          item, null, sf, ws, livePool, dryRecord, result
+          item, null, item.title, sf, ws, livePool, dryRecord, result
         );
       }
     }
@@ -1270,6 +1284,7 @@ export class SimpleBookmarkSyncManager {
     // ── Delete unmatched live pinned tabs in this space ────────────────
     for (const lp of livePool) {
       if (lp.matched) continue;
+      this.log(`Unmatched live tab: url="${lp.url}" folderLabel="${lp.folderLabel}" space="${sf.name}"`);
       const desc = `Delete pinned tab "${lp.url}" from space "${sf.name}"`;
       if (dryRecord("deleted", "delete-tab", desc, { url: lp.url, space: sf.name })) {
         try {
@@ -1289,7 +1304,7 @@ export class SimpleBookmarkSyncManager {
    * inside it, then recurses into any sub-folder children — nesting them
    * inside the parent via `insertAfter` on the parent's groupContainer.
    */
-  async _reconcileFolderRecursive(folderEntry, parentFolder, sf, ws, livePool, dryRecord, result) {
+  async _reconcileFolderRecursive(folderEntry, parentFolder, folderPath, sf, ws, livePool, dryRecord, result) {
     const win          = this.manager.window;
     const gBrowser     = win.gBrowser;
     const gZenWorkspaces = win.gZenWorkspaces;
@@ -1357,6 +1372,7 @@ export class SimpleBookmarkSyncManager {
               tab.setAttribute("skipbackgroundnotify", "true");
               tab.setAttribute("zentabs-pending-url", bm.url);
               tab.setAttribute("zen-workspace-id", ws.uuid);
+              tab.setAttribute("zentabs-folder-path", folderPath);
               gBrowser.pinTab(tab);
               folderRef.addTabs([tab]);
               result.created++;
@@ -1376,6 +1392,7 @@ export class SimpleBookmarkSyncManager {
               tab.setAttribute("skipbackgroundnotify", "true");
               tab.setAttribute("zentabs-pending-url", bm.url);
               tab.setAttribute("zen-workspace-id", ws.uuid);
+              tab.setAttribute("zentabs-folder-path", folderPath);
               newTabs.push(tab);
             }
             if (gZenFolders?.createFolder) {
@@ -1406,26 +1423,35 @@ export class SimpleBookmarkSyncManager {
         result.created += toCreate.length - 1;
       }
     } else if (!folderRef && subFolders.length > 0 && gZenFolders?.createFolder) {
-      // No tabs to create, but sub-folders need a parent.  Create an empty
-      // folder (Zen always adds an internal empty-tab placeholder).
-      const desc = `Create empty Zen folder "${folderEntry.title}" (parent for sub-folders) in space "${sf.name}"`;
-      if (dryRecord("created", "create-zen-folder", desc,
-        { folder: folderEntry.title, space: sf.name })) {
-        const opts = {
-          label:       folderEntry.title,
-          workspaceId: ws.uuid,
-        };
-        if (parentFolder?.groupContainer) {
-          opts.insertAfter = parentFolder.groupContainer.lastElementChild;
+      // No tabs to create, but sub-folders need a parent.
+      // Before creating a new folder, check if the folder already exists
+      // but tab.group is null (inactive space).  A tab with
+      // zentabs-folder-path starting with this folder's name means the
+      // folder was already created in a previous run.
+      const folderAlreadyExists = livePool.some(
+        lp => lp.tab.getAttribute?.("zentabs-folder-path")?.split("/").includes(folderEntry.title)
+      );
+      if (!folderAlreadyExists) {
+        const desc = `Create empty Zen folder "${folderEntry.title}" (parent for sub-folders) in space "${sf.name}"`;
+        if (dryRecord("created", "create-zen-folder", desc,
+          { folder: folderEntry.title, space: sf.name })) {
+          const opts = {
+            label:       folderEntry.title,
+            workspaceId: ws.uuid,
+          };
+          if (parentFolder?.groupContainer) {
+            opts.insertAfter = parentFolder.groupContainer.lastElementChild;
+          }
+          folderRef = gZenFolders.createFolder([], opts);
         }
-        folderRef = gZenFolders.createFolder([], opts);
       }
     }
 
     // Recursively handle sub-folders, nesting them inside this folder.
     for (const subFolder of subFolders) {
+      const subPath = folderPath + "/" + subFolder.title;
       await this._reconcileFolderRecursive(
-        subFolder, folderRef, sf, ws, livePool, dryRecord, result
+        subFolder, folderRef, subPath, sf, ws, livePool, dryRecord, result
       );
     }
   }
@@ -1458,7 +1484,7 @@ export class SimpleBookmarkSyncManager {
         try {
           const json   = decodeURIComponent(item.uri.replace("data:application/json,", ""));
           const parsed = JSON.parse(json);
-          result.set(parsed.name, { icon: parsed.icon ?? null, theme: parsed.theme ?? {} });
+          result.set(parsed.name, { icon: parsed.icon ?? null, theme: parsed.theme ?? {}, containerTabId: parsed.containerTabId ?? 0 });
         } catch (_) {
           // Malformed entry — skip silently.
         }
