@@ -170,7 +170,7 @@ export class CleanupManager {
         if (this.manager.window.gBrowser.discardBrowser) {
           this.manager.window.gBrowser.discardBrowser(tabData.tab);
           unloaded++;
-          this.log(`Auto-unloaded stale tab: ${tabData.title} (idle ${tabData.lastAccessedAge.seconds}s)`);
+          this.log(`Unloaded tab (idle timeout): ${tabData.title} — idle ${tabData.lastAccessedAge.seconds}s, threshold ${this.manager.preferences.autoUnloadDelay}s`);
         }
       } catch (e) {
         console.error("[ZenTabs] Error auto-unloading tab:", e);
@@ -231,9 +231,9 @@ export class CleanupManager {
     
     const allTabs = await this.manager.tabManager.getAllTabs();
     
-    // Sort tabs by last accessed (oldest first)
+    // Sort tabs by last accessed (oldest first — highest age first)
     const sortedTabs = allTabs.sort((a, b) => 
-      a.lastAccessedAge.milliseconds - b.lastAccessedAge.milliseconds
+      b.lastAccessedAge.milliseconds - a.lastAccessedAge.milliseconds
     );
     
     for (const tabData of sortedTabs) {
@@ -279,7 +279,7 @@ export class CleanupManager {
             title: tabData.title,
             age: tabData.lastAccessedAge.days
           });
-          this.log(`Unloaded tab: ${tabData.title}`);
+          this.log(`Unloaded tab (memory pressure): ${tabData.title} — RAM at ${memoryInfo.percentUsed}%, threshold ${opts.threshold}%`);
         }
       } catch (error) {
         console.error("Error unloading tab:", error);
