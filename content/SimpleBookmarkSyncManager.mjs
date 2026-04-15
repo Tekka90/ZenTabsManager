@@ -859,6 +859,12 @@ export class SimpleBookmarkSyncManager {
 
       // 6. Build deduplicated desired essential tab list across all spaces.
       const desiredEssentials = this._buildDesiredEssentials(spaceFolders);
+      this.log(
+        `Restore: ${spaceFolders.length} space(s),`,
+        `essentials per space: [${spaceFolders.map(sf => `${sf.name}:${sf.essentials.reduce((n, e) => n + e.items.length, 0)}`).join(", ")}],`,
+        `desired: ${desiredEssentials.length}, live: ${liveEssentials.length}`,
+        desiredEssentials.length ? desiredEssentials.map(d => d.url) : ""
+      );
 
       // 7. Reconcile essential tabs globally.
       await this._reconcileEssentialTabs(
@@ -1261,17 +1267,22 @@ export class SimpleBookmarkSyncManager {
     // Resolve or create the Zen folder reference.
     let folderRef = null;
 
-    // First, look for an existing folder with this name in this workspace.
+    // Look for an existing Zen folder with this name in this workspace.
+    // Walk the full group chain for each tab because `tab.group` points to
+    // the innermost folder — a tab in "Projects > Sub" has group.label
+    // "Sub", not "Projects".  We need to find the group at the right level.
     const allLiveTabs = gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
     for (const lt of allLiveTabs) {
-      if (
-        lt.getAttribute("zen-workspace-id") === ws.uuid &&
-        lt.group?.isZenFolder &&
-        lt.group.label === folderEntry.title
-      ) {
-        folderRef = lt.group;
-        break;
+      if (lt.getAttribute("zen-workspace-id") !== ws.uuid) continue;
+      let g = lt.group;
+      while (g && g.isZenFolder) {
+        if (g.label === folderEntry.title) {
+          folderRef = g;
+          break;
+        }
+        g = g.group; // walk up to parent folder
       }
+      if (folderRef) break;
     }
 
     if (toCreate.length > 0) {
@@ -1339,14 +1350,18 @@ export class SimpleBookmarkSyncManager {
     } else if (!folderRef && subFolders.length > 0 && gZenFolders?.createFolder) {
       // No tabs to create, but sub-folders need a parent.  Create an empty
       // folder (Zen always adds an internal empty-tab placeholder).
-      const opts = {
-        label:       folderEntry.title,
-        workspaceId: ws.uuid,
-      };
-      if (parentFolder?.groupContainer) {
-        opts.insertAfter = parentFolder.groupContainer.lastElementChild;
+      const desc = `Create empty Zen folder "${folderEntry.title}" (parent for sub-folders) in space "${sf.name}"`;
+      if (dryRecord("created", "create-zen-folder", desc,
+        { folder: folderEntry.title, space: sf.name })) {
+        const opts = {
+          label:       folderEntry.title,
+          workspaceId: ws.uuid,
+        };
+        if (parentFolder?.groupContainer) {
+          opts.insertAfter = parentFolder.groupContainer.lastElementChild;
+        }
+        folderRef = gZenFolders.createFolder([], opts);
       }
-      folderRef = gZenFolders.createFolder([], opts);
     }
 
     // Recursively handle sub-folders, nesting them inside this folder.

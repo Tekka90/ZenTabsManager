@@ -214,6 +214,7 @@ export function makeGZenWorkspaces(workspaces = [], allTabs = []) {
   let _counter = 1;
   let _activeUuid = workspaces[0]?.uuid ?? null;
   let _switchCount = 0;
+  let _allStoredTabs = allTabs;
   const obj = {
     getWorkspaces: ()           => workspaces,
     getWorkspaceFromId: (uuid)  => byUuid.get(uuid) ?? null,
@@ -222,7 +223,10 @@ export function makeGZenWorkspaces(workspaces = [], allTabs = []) {
     // Allow tests to set the active uuid directly without async changeWorkspaceWithID
     set _activeUuid(uuid)       { _activeUuid = uuid; },
     get _activeUuid()           { return _activeUuid; },
-    get allStoredTabs()         { return allTabs; },
+    get allStoredTabs()         { return _allStoredTabs; },
+    set allStoredTabs(val)      { _allStoredTabs = val; },
+    get _allStoredTabs()        { return _allStoredTabs; },
+    set _allStoredTabs(val)     { _allStoredTabs = val; },
     get switchCount()           { return _switchCount; },
     async changeWorkspaceWithID(uuid) {
       _switchCount++;
@@ -303,7 +307,25 @@ export function makeGZenFolders() {
         parentFolder: null,
         tabs: [...tabs],
         groupContainer,
+        isZenFolder: true,
+        // Allow the chain to walk up: entry.group points to the parent
+        // folder's group object (set below if nested).
+        group: null,
+        // Support addTabs for appending tabs to an existing folder.
+        addTabs(newTabs) {
+          for (const t of newTabs) {
+            t.pinned = true;
+            t.group = entry;
+            groupContainer._children.push(t);
+            entry.tabs.push(t);
+          }
+        },
       };
+
+      // Set tab.group on all tabs to point to this folder entry.
+      for (const tab of tabs) {
+        tab.group = entry;
+      }
 
       // Resolve parent folder from `insertAfter` (DOM-based nesting).
       // If `insertAfter` is an element that belongs to another folder's
@@ -312,6 +334,7 @@ export function makeGZenFolders() {
         for (const folder of createdFolders) {
           if (folder.groupContainer._children.includes(options.insertAfter)) {
             entry.parentFolder = folder;
+            entry.group = folder; // chain walk: entry.group → parent folder
             folder.groupContainer._children.push(entry);
             break;
           }

@@ -1280,3 +1280,156 @@ describe("syncBookmarksToTabs — order preservation", () => {
     assert.ok(firstIdx < lastIdx, "First must appear before Last — bookmark order preserved");
   });
 });
+
+// ── Round-trip: save essentials → clear tabs → restore ────────────────────
+
+describe("syncBookmarksToTabs — round-trip essentials", () => {
+  test("essentials saved by syncTabsToBookmarks are restored by syncBookmarksToTabs", async () => {
+    // 1. Set up a browser with essential + pinned tabs.
+    const ws = { uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 };
+    const essTab = makeEssentialTab("https://mail.example.com", 0, ws.uuid, { label: "Mail" });
+    const pinTab = makePinnedTab("https://github.com", 1, ws.uuid, { label: "GitHub" });
+    const mgr = makeManager({ workspaces: [ws], tabs: [essTab, pinTab] });
+    const sm = new SimpleBookmarkSyncManager(mgr);
+
+    // 2. Save tabs → bookmarks.
+    const saveResult = await sm.syncTabsToBookmarks();
+    assert.equal(saveResult.errors.length, 0, "save must succeed");
+
+    // 3. Verify the bookmark tree has an Essentials/ folder.
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    const allEntries = [...store.values()];
+    const essFolders = allEntries.filter(e => e.type === "folder" && e.title === "Essentials");
+    assert.ok(essFolders.length > 0, "Essentials/ bookmark folder must exist after save");
+    const essBookmarks = allEntries.filter(
+      e => e.type === "bookmark" && e.parentGuid === essFolders[0].guid
+    );
+    assert.ok(essBookmarks.length > 0, "Essentials/ must contain bookmarks after save");
+
+    // 4. Clear all live tabs (simulate empty browser).
+    mgr.window.gBrowser.tabs.length = 0;
+    mgr.window.gZenWorkspaces._allStoredTabs = [];
+
+    // 5. Restore bookmarks → tabs.
+    const restoreResult = await sm.syncBookmarksToTabs();
+    assert.equal(restoreResult.errors.length, 0, "restore must succeed");
+    assert.ok(restoreResult.created >= 2, `expected at least 2 created, got ${restoreResult.created}`);
+
+    // 6. Verify an essential tab was created.
+    const tabs = mgr.window.gBrowser.tabs;
+    const restoredEss = tabs.find(
+      t => t.linkedBrowser.currentURI.spec === "https://mail.example.com"
+    );
+    assert.ok(restoredEss, "essential tab must be restored from bookmarks");
+  });
+
+  test("round-trip with two spaces sharing same container deduplicates essentials", async () => {
+    const ws1 = { uuid: "uuid-w1", name: "Work", icon: null, theme: {}, containerTabId: 0 };
+    const ws2 = { uuid: "uuid-w2", name: "Personal", icon: null, theme: {}, containerTabId: 0 };
+    const ess1 = makeEssentialTab("https://mail.example.com", 0, ws1.uuid, { label: "Mail" });
+    const ess2 = makeEssentialTab("https://mail.example.com", 1, ws2.uuid, { label: "Mail" });
+    const pin1 = makePinnedTab("https://work.com", 2, ws1.uuid, { label: "Work" });
+    const mgr = makeManager({ workspaces: [ws1, ws2], tabs: [ess1, ess2, pin1] });
+    const sm = new SimpleBookmarkSyncManager(mgr);
+
+    // Save tabs → bookmarks.
+    const saveResult = await sm.syncTabsToBookmarks();
+    assert.equal(saveResult.errors.length, 0);
+
+    // Clear all live tabs.
+    mgr.window.gBrowser.tabs.length = 0;
+    mgr.window.gZenWorkspaces._allStoredTabs = [];
+
+    // Restore bookmarks → tabs.
+    const result = await sm.syncBookmarksToTabs();
+    assert.equal(result.errors.length, 0, "restore must succeed");
+
+    // Only 1 essential tab should be created (deduplicated), plus 1 pinned.
+    const tabs = mgr.window.gBrowser.tabs;
+    const essentialCount = tabs.filter(
+      t => t.linkedBrowser.currentURI.spec === "https://mail.example.com"
+    ).length;
+    assert.equal(essentialCount, 1, "shared essential must be created only once");
+  });
+});
+
+// ── syncBookmarksToTabs — second run idempotency ──────────────────────────
+
+describe("syncBookmarksToTabs — second run idempotency", () => {
+  test("second restore run does not create duplicate folders", async () => {
+    const mgr   = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    // Toolbar → ZenTabs/ → Work/ → Projects/ → bm-a  +  Sub/ → bm-b
+    store.set("toolbar",      { guid: "toolbar",        parentGuid: null,              type: "folder",   title: "Bookmarks Toolbar", url: null });
+    store.set("zt",           { guid: "zt",             parentGuid: "toolbar",         type: "folder",   title: "ZenTabs",          url: null });
+    store.set("ws-work",      { guid: "ws-work",        parentGuid: "zt",              type: "folder",   title: "Work",             url: null });
+    store.set("folder-proj",  { guid: "folder-proj",    parentGuid: "ws-work",         type: "folder",   title: "Projects",         url: null });
+    store.set("bm-a",         { guid: "bm-a",           parentGuid: "folder-proj",     type: "bookmark", title: "A",                url: "https://a.com" });
+    store.set("folder-sub",   { guid: "folder-sub",     parentGuid: "folder-proj",     type: "folder",   title: "Sub",              url: null });
+    store.set("bm-b",         { guid: "bm-b",           parentGuid: "folder-sub",      type: "bookmark", title: "B",                url: "https://b.com" });
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      []
+    );
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+
+    // First run: creates tabs + folders.
+    const r1 = await sm.syncBookmarksToTabs();
+    assert.equal(r1.errors.length, 0, "first run must succeed");
+    assert.ok(r1.created >= 2, "first run creates tabs");
+
+    const foldersAfterRun1 = mgr.window.gZenFolders._createdFolders.length;
+
+    // Simulate the browser having these tabs live for the second run:
+    // allStoredTabs must include the tabs created by the first run.
+    const tabs = mgr.window.gBrowser.tabs;
+    mgr.window.gZenWorkspaces.allStoredTabs = [...tabs];
+
+    // Second run: should be a no-op (all tabs already exist).
+    const r2 = await sm.syncBookmarksToTabs();
+    assert.equal(r2.errors.length, 0, "second run must succeed");
+    assert.equal(r2.created, 0, "second run must not create anything");
+    assert.equal(r2.deleted, 0, "second run must not delete anything");
+
+    const foldersAfterRun2 = mgr.window.gZenFolders._createdFolders.length;
+    assert.equal(foldersAfterRun2, foldersAfterRun1,
+      "second run must NOT create duplicate folders");
+  });
+
+  test("folder with only sub-folders is found via group chain walk", async () => {
+    const mgr   = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    // Projects/ has NO direct bookmarks — only a sub-folder with a bookmark.
+    store.set("toolbar",      { guid: "toolbar",        parentGuid: null,              type: "folder",   title: "Bookmarks Toolbar", url: null });
+    store.set("zt",           { guid: "zt",             parentGuid: "toolbar",         type: "folder",   title: "ZenTabs",          url: null });
+    store.set("ws",           { guid: "ws",             parentGuid: "zt",              type: "folder",   title: "Work",             url: null });
+    store.set("folder-proj",  { guid: "folder-proj",    parentGuid: "ws",              type: "folder",   title: "Projects",         url: null });
+    store.set("folder-sub",   { guid: "folder-sub",     parentGuid: "folder-proj",     type: "folder",   title: "SubProj",          url: null });
+    store.set("bm-x",         { guid: "bm-x",           parentGuid: "folder-sub",      type: "bookmark", title: "X",                url: "https://x.com" });
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      []
+    );
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+
+    // First run.
+    const r1 = await sm.syncBookmarksToTabs();
+    assert.equal(r1.errors.length, 0);
+
+    const foldersAfterRun1 = mgr.window.gZenFolders._createdFolders.length;
+
+    // Set up for second run.
+    mgr.window.gZenWorkspaces.allStoredTabs = [...mgr.window.gBrowser.tabs];
+
+    // Second run: folderRef must be found via chain walk (tab.group.group).
+    const r2 = await sm.syncBookmarksToTabs();
+    assert.equal(r2.created, 0, "second run must not create anything");
+
+    assert.equal(mgr.window.gZenFolders._createdFolders.length, foldersAfterRun1,
+      "no new folders created on second run");
+  });
+});
