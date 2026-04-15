@@ -178,6 +178,7 @@ export function makeGBrowser(tabs = []) {
       addTabCalls.push({ url, opts: { ...opts } });
       const tab = makeTab({ url, lastAccessed: Date.now() });
       if (opts?.userContextId !== undefined) tab.setAttribute("usercontextid", String(opts.userContextId));
+      if (opts?.lazyTabTitle) tab.setAttribute("label", opts.lazyTabTitle);
       openTabs.push(tab);
       return tab;
     },

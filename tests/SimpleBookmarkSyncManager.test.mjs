@@ -348,6 +348,18 @@ describe("getPinnedUrl", () => {
     // Falls through to currentURI (about:blank)
     assert.equal(sm.getPinnedUrl(tab), "about:blank");
   });
+
+  test("falls back to zentabs-pending-url when all other sources fail", () => {
+    const mgr = makeManager();
+    mgr.window.SessionStore = { getLazyTabValue: () => null };
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const tab = makeTab({
+      url: "about:blank",
+      pinned: true,
+      attrs: { "zentabs-pending-url": "https://pending.example.com" },
+    });
+    assert.equal(sm.getPinnedUrl(tab), "https://pending.example.com");
+  });
 });
 
 // ── getContainerName ──────────────────────────────────────────────────────
@@ -1188,16 +1200,19 @@ describe("syncBookmarksToTabs — live", () => {
     assert.ok(essTab, "essential tab should be created");
   });
 
-  test("marks new tab as essential via gZenPinnedTabManager.addToEssentials", async () => {
+  test("marks new tab as essential via setAttribute + pinTab (SyncManager approach)", async () => {
     const mgr = makeSyncManagerWithTree();
     const sm  = new SimpleBookmarkSyncManager(mgr);
     await sm.syncBookmarksToTabs();
-    const calls = mgr.window.gZenPinnedTabManager.addToEssentialsCalls;
-    assert.ok(calls.length >= 1, "addToEssentials must be called");
-    // addToEssentials sets the attribute — verify the tab now has it
-    assert.ok(calls[0].hasAttribute("zen-essential"), "tab must have zen-essential after addToEssentials");
-    // The tab must also be pinned (addToEssentials pins it)
-    assert.ok(calls[0].pinned, "tab must be pinned after addToEssentials");
+    // The newly created tab should have zen-essential and be pinned
+    const tabs = mgr.window.gBrowser.tabs;
+    const essTab = tabs.find(t => t.linkedBrowser.currentURI.spec === "https://mail.com");
+    assert.ok(essTab, "essential tab must exist");
+    assert.ok(essTab.hasAttribute("zen-essential"), "tab must have zen-essential attribute");
+    assert.ok(essTab.pinned, "tab must be pinned");
+    // zentabs-pending-url must be set for URL matching on subsequent runs
+    assert.equal(essTab.getAttribute("zentabs-pending-url"), "https://mail.com",
+      "zentabs-pending-url must be set");
   });
 
   test("deletes a live essential tab that has no matching bookmark", async () => {
@@ -1258,13 +1273,42 @@ describe("syncBookmarksToTabs — live", () => {
     const result = await sm.syncBookmarksToTabs();
 
     // The phantom tab should NOT have matched (not pinned), so the essential
-    // should be recreated via addToEssentials AND the phantom deleted.
+    // should be recreated via setAttribute + pinTab AND the phantom deleted.
     assert.ok(result.created >= 1, "essential should be recreated when phantom exists");
     assert.ok(result.deleted >= 1, "phantom essential should be deleted");
 
-    // Verify addToEssentials was actually called
-    const calls = mgr.window.gZenPinnedTabManager.addToEssentialsCalls;
-    assert.ok(calls.length >= 1, "addToEssentials must be called for the new essential");
+    // Verify the new tab has zen-essential and is pinned
+    const tabs = mgr.window.gBrowser.tabs;
+    const essTab = tabs.find(t =>
+      t.linkedBrowser.currentURI.spec === "https://mail.com" &&
+      t.hasAttribute("zen-essential") && t.pinned
+    );
+    assert.ok(essTab, "recreated essential must have attribute and be pinned");
+  });
+
+  test("created pinned tabs get zentabs-pending-url and skipbackgroundnotify", async () => {
+    const mgr   = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    store.set("toolbar",  { guid: "toolbar",  parentGuid: null,       type: "folder",   title: "Bookmarks Toolbar", url: null });
+    store.set("zt",       { guid: "zt",       parentGuid: "toolbar",  type: "folder",   title: "ZenTabs",          url: null });
+    store.set("ws-work",  { guid: "ws-work",  parentGuid: "zt",       type: "folder",   title: "Work",             url: null });
+    store.set("bm-1",     { guid: "bm-1",     parentGuid: "ws-work",  type: "bookmark", title: "Site",             url: "https://site.com" });
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      []
+    );
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs();
+    assert.equal(result.created, 1);
+    const tab = mgr.window.gBrowser.tabs.find(t =>
+      t.linkedBrowser.currentURI.spec === "https://site.com"
+    );
+    assert.ok(tab, "pinned tab must be created");
+    assert.equal(tab.getAttribute("zentabs-pending-url"), "https://site.com",
+      "pinned tab must have zentabs-pending-url");
+    assert.equal(tab.getAttribute("skipbackgroundnotify"), "true",
+      "pinned tab must have skipbackgroundnotify");
   });
 });
 

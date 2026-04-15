@@ -154,6 +154,12 @@ export class SimpleBookmarkSyncManager {
       }
     } catch (_) { /* non-fatal */ }
 
+    // Tabs created by syncBookmarksToTabs store the intended URL in a
+    // zentabs-pending-url attribute so matching works even before the tab
+    // has loaded or the session manager has persisted it.
+    const pending = tab.getAttribute?.("zentabs-pending-url");
+    if (pending && !this._isBlankUrl(pending)) return pending;
+
     return live ?? null;
   }
 
@@ -1157,7 +1163,13 @@ export class SimpleBookmarkSyncManager {
         const desc = `Create essential tab "${d.title}" (${d.url}) [container: ${d.containerName}]`;
         if (dryRecord("created", "create-tab", desc, { url: d.url, title: d.title, container: d.containerName })) {
           try {
-            const tab = gBrowser.addTrustedTab(d.url, {
+            // Use gBrowser.addTab (not addTrustedTab) with inBackground to
+            // match SyncManager's proven approach.  Set zen-essential BEFORE
+            // pinTab — Zen's pinTab override routes essential-flagged tabs
+            // to the essentials DOM section.  Do NOT use addToEssentials()
+            // because it doesn't move unpinned tabs to the section.
+            const tab = gBrowser.addTab(d.url, {
+              inBackground:      true,
               createLazyBrowser: true,
               lazyTabTitle:      d.title,
               skipAnimation:     true,
@@ -1165,16 +1177,10 @@ export class SimpleBookmarkSyncManager {
               triggeringPrincipal:
                 win.Services?.scriptSecurityManager?.getSystemPrincipal?.(),
             });
-            // IMPORTANT: Do NOT set zen-essential before addToEssentials.
-            // Zen's addToEssentials() skips tabs that already have the attribute,
-            // so it would never pin the tab or move it to the essentials section.
-            if (win.gZenPinnedTabManager?.addToEssentials) {
-              win.gZenPinnedTabManager.addToEssentials(tab);
-            } else {
-              // Fallback: manual approach (same as SyncManager)
-              tab.setAttribute("zen-essential", "true");
-              gBrowser.pinTab(tab);
-            }
+            tab.setAttribute("skipbackgroundnotify", "true");
+            tab.setAttribute("zentabs-pending-url", d.url);
+            tab.setAttribute("zen-essential", "true");
+            gBrowser.pinTab(tab);
             result.created++;
           } catch (e) {
             result.errors.push(`create essential tab ${d.url}: ${e.message}`);
@@ -1235,13 +1241,16 @@ export class SimpleBookmarkSyncManager {
           if (dryRecord("created", "create-tab", desc,
             { url: item.url, title: item.title, space: sf.name })) {
             try {
-              const tab = gBrowser.addTrustedTab(item.url, {
+              const tab = gBrowser.addTab(item.url, {
+                inBackground:      true,
                 createLazyBrowser: true,
                 lazyTabTitle:      item.title,
                 skipAnimation:     true,
                 triggeringPrincipal:
                   win.Services?.scriptSecurityManager?.getSystemPrincipal?.(),
               });
+              tab.setAttribute("skipbackgroundnotify", "true");
+              tab.setAttribute("zentabs-pending-url", item.url);
               tab.setAttribute("zen-workspace-id", ws.uuid);
               gBrowser.pinTab(tab);
               gZenWorkspaces.moveTabToWorkspace(tab, ws.uuid);
@@ -1337,13 +1346,16 @@ export class SimpleBookmarkSyncManager {
           if (folderRef) {
             // Folder exists — insert new tabs into it.
             for (const bm of toCreate) {
-              const tab = gBrowser.addTrustedTab(bm.url, {
+              const tab = gBrowser.addTab(bm.url, {
+                inBackground:      true,
                 createLazyBrowser: true,
                 lazyTabTitle:      bm.title,
                 skipAnimation:     true,
                 triggeringPrincipal:
                   win.Services?.scriptSecurityManager?.getSystemPrincipal?.(),
               });
+              tab.setAttribute("skipbackgroundnotify", "true");
+              tab.setAttribute("zentabs-pending-url", bm.url);
               tab.setAttribute("zen-workspace-id", ws.uuid);
               gBrowser.pinTab(tab);
               folderRef.addTabs([tab]);
@@ -1353,13 +1365,16 @@ export class SimpleBookmarkSyncManager {
             // Create new tabs and wrap them in a new Zen folder.
             const newTabs = [];
             for (const bm of toCreate) {
-              const tab = gBrowser.addTrustedTab(bm.url, {
+              const tab = gBrowser.addTab(bm.url, {
+                inBackground:      true,
                 createLazyBrowser: true,
                 lazyTabTitle:      bm.title,
                 skipAnimation:     true,
                 triggeringPrincipal:
                   win.Services?.scriptSecurityManager?.getSystemPrincipal?.(),
               });
+              tab.setAttribute("skipbackgroundnotify", "true");
+              tab.setAttribute("zentabs-pending-url", bm.url);
               tab.setAttribute("zen-workspace-id", ws.uuid);
               newTabs.push(tab);
             }
