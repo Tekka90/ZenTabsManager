@@ -1070,10 +1070,14 @@ export class SimpleBookmarkSyncManager {
       const ws = await win.gZenWorkspaces.createAndSaveWorkspace(
         name, icon, /* dontChange= */ true, containerTabId
       );
-      if (theme && Object.keys(theme).length > 0) {
-        ws.theme = theme;
-        await win.gZenWorkspaces.saveWorkspace(ws);
-      }
+      // Zen's createAndSaveWorkspace may override name and containerTabId
+      // when currentWindowIsSyncing is false (it reads from the selected
+      // tab instead).  Force the correct values and re-save.
+      ws.name = name;
+      ws.containerTabId = containerTabId;
+      if (icon !== undefined) ws.icon = icon;
+      if (theme && Object.keys(theme).length > 0) ws.theme = theme;
+      await win.gZenWorkspaces.saveWorkspace(ws);
       return ws;
     } catch (e) {
       result.errors.push(`create space "${name}": ${e.message}`);
@@ -1226,14 +1230,14 @@ export class SimpleBookmarkSyncManager {
     // Use _getTabFolderPath to resolve folder labels — tab.group is null
     // for tabs in inactive spaces, so the zentabs-folder-path attribute
     // must be checked as a fallback.
+    // Store the FULL folder path (slash-separated) so matching distinguishes
+    // "1M Panels" (root) from "Project/1M Panels" (nested).
     const livePool = livePinned.map(t => {
       const folderPath = this._getTabFolderPath(t);
-      // The immediate (innermost) folder label for matching.
-      const folderLabel = folderPath ? folderPath[folderPath.length - 1] : null;
       return {
         tab:         t,
         url:         this.getPinnedUrl(t) ?? "",
-        folderLabel,
+        folderPath:  folderPath ? folderPath.join("/") : null,
         matched:     false,
       };
     });
@@ -1245,7 +1249,7 @@ export class SimpleBookmarkSyncManager {
         if (!item.url || this._isBlankUrl(item.url)) continue;
 
         const idx = livePool.findIndex(
-          lp => !lp.matched && lp.url === item.url && !lp.folderLabel
+          lp => !lp.matched && lp.url === item.url && !lp.folderPath
         );
         if (idx !== -1) {
           livePool[idx].matched = true;
@@ -1284,7 +1288,7 @@ export class SimpleBookmarkSyncManager {
     // ── Delete unmatched live pinned tabs in this space ────────────────
     for (const lp of livePool) {
       if (lp.matched) continue;
-      this.log(`Unmatched live tab: url="${lp.url}" folderLabel="${lp.folderLabel}" space="${sf.name}"`);
+      this.log(`Unmatched live tab: url="${lp.url}" folderPath="${lp.folderPath}" space="${sf.name}"`);
       const desc = `Delete pinned tab "${lp.url}" from space "${sf.name}"`;
       if (dryRecord("deleted", "delete-tab", desc, { url: lp.url, space: sf.name })) {
         try {
@@ -1322,7 +1326,7 @@ export class SimpleBookmarkSyncManager {
     const toCreate = [];
     for (const bm of directBookmarks) {
       const idx = livePool.findIndex(
-        lp => !lp.matched && lp.url === bm.url && lp.folderLabel === folderEntry.title
+        lp => !lp.matched && lp.url === bm.url && lp.folderPath === folderPath
       );
       if (idx !== -1) {
         livePool[idx].matched = true;
@@ -1334,20 +1338,28 @@ export class SimpleBookmarkSyncManager {
     // Resolve or create the Zen folder reference.
     let folderRef = null;
 
-    // Look for an existing Zen folder with this name in this workspace.
-    // Walk the full group chain for each tab because `tab.group` points to
-    // the innermost folder — a tab in "Projects > Sub" has group.label
-    // "Sub", not "Projects".  We need to find the group at the right level.
+    // Look for an existing Zen folder matching the full path in this workspace.
+    // The folderPath (e.g. "Project/Sub") must match the group's ancestor chain
+    // exactly — otherwise a root-level "Sub" would incorrectly match "Project/Sub".
+    const pathParts = folderPath.split("/");
     const allLiveTabs = gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
     for (const lt of allLiveTabs) {
       if (lt.getAttribute("zen-workspace-id") !== ws.uuid) continue;
+      // Build the tab's full folder chain.
+      const chain = [];
       let g = lt.group;
       while (g && g.isZenFolder) {
-        if (g.label === folderEntry.title) {
-          folderRef = g;
+        chain.unshift(g);
+        g = g.group;
+      }
+      // Find the group at the correct depth whose ancestor chain matches.
+      for (let i = 0; i < chain.length; i++) {
+        if (chain[i].label !== pathParts[i]) break;
+        if (i === pathParts.length - 1) {
+          // Full path matched — this is the correct folder.
+          folderRef = chain[i];
           break;
         }
-        g = g.group; // walk up to parent folder
       }
       if (folderRef) break;
     }

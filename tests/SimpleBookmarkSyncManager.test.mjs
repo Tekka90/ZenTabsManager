@@ -1581,3 +1581,83 @@ describe("syncBookmarksToTabs — second run idempotency", () => {
       "no new folders created on second run");
   });
 });
+
+// ── syncBookmarksToTabs — misplaced folder correction ─────────────────────
+
+describe("syncBookmarksToTabs — misplaced folder correction", () => {
+  test("tab in wrong folder is deleted and recreated in correct folder", async () => {
+    const mgr   = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    // Bookmarks: Work/ → Project/ → Sub/ → bm-a
+    store.set("toolbar",      { guid: "toolbar",     parentGuid: null,           type: "folder",   title: "Bookmarks Toolbar", url: null });
+    store.set("zt",           { guid: "zt",          parentGuid: "toolbar",      type: "folder",   title: "ZenTabs",          url: null });
+    store.set("ws-work",      { guid: "ws-work",     parentGuid: "zt",           type: "folder",   title: "Work",             url: null });
+    store.set("folder-proj",  { guid: "folder-proj", parentGuid: "ws-work",      type: "folder",   title: "Project",          url: null });
+    store.set("folder-sub",   { guid: "folder-sub",  parentGuid: "folder-proj",  type: "folder",   title: "Sub",              url: null });
+    store.set("bm-a",         { guid: "bm-a",        parentGuid: "folder-sub",   type: "bookmark", title: "A",                url: "https://a.com" });
+
+    // Live state: tab is in "Sub" at root level (not nested under "Project")
+    const misplacedTab = makeTab({
+      url: "https://a.com",
+      pinned: true,
+      attrs: {
+        "zen-workspace-id": "uuid-work",
+        "zentabs-folder-path": "Sub",  // wrong: should be "Project/Sub"
+      },
+    });
+    // Give it a group that represents root-level "Sub"
+    misplacedTab.group = { isZenFolder: true, label: "Sub", group: null };
+
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      [misplacedTab]
+    );
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs();
+
+    // The misplaced tab should be deleted and a new one created in the
+    // correct folder (Project/Sub).
+    assert.ok(result.deleted >= 1, "misplaced tab must be deleted");
+    assert.ok(result.created >= 1, "tab must be recreated in correct folder");
+
+    // The new tab should have the correct folder path.
+    const correctTab = mgr.window.gBrowser.tabs.find(
+      t => t.getAttribute("zentabs-pending-url") === "https://a.com" &&
+           t.getAttribute("zentabs-folder-path") === "Project/Sub"
+    );
+    assert.ok(correctTab, "recreated tab must have correct folder path");
+  });
+
+  test("tab at root when bookmark is in a folder — detected and fixed", async () => {
+    const mgr   = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    // Bookmarks: Work/ → Project/ → bm-a
+    store.set("toolbar",      { guid: "toolbar",     parentGuid: null,           type: "folder",   title: "Bookmarks Toolbar", url: null });
+    store.set("zt",           { guid: "zt",          parentGuid: "toolbar",      type: "folder",   title: "ZenTabs",          url: null });
+    store.set("ws-work",      { guid: "ws-work",     parentGuid: "zt",           type: "folder",   title: "Work",             url: null });
+    store.set("folder-proj",  { guid: "folder-proj", parentGuid: "ws-work",      type: "folder",   title: "Project",          url: null });
+    store.set("bm-a",         { guid: "bm-a",        parentGuid: "folder-proj",  type: "bookmark", title: "A",                url: "https://a.com" });
+
+    // Live state: tab is at root (no folder)
+    const rootTab = makeTab({
+      url: "https://a.com",
+      pinned: true,
+      attrs: { "zen-workspace-id": "uuid-work" },
+    });
+
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      [rootTab]
+    );
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs();
+
+    // Root tab should not match folder bookmark — deleted + recreated.
+    assert.ok(result.deleted >= 1, "root tab must be deleted");
+    assert.ok(result.created >= 1, "tab must be created in correct folder");
+  });
+});
