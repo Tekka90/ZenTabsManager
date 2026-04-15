@@ -202,6 +202,10 @@ export function makeGBrowser(tabs = []) {
     pinTab(tab) {
       tab.pinned = true;
     },
+    moveTabTo(tab, opts) {
+      const newIndex = typeof opts === "number" ? opts : opts?.tabIndex ?? 0;
+      tab._tPos = newIndex;
+    },
     tabContainer: { addEventListener: () => {} },
     _removed: removed,
     _discarded: discarded,

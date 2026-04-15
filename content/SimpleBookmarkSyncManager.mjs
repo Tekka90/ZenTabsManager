@@ -1299,6 +1299,102 @@ export class SimpleBookmarkSyncManager {
         }
       }
     }
+
+    // ── Enforce bookmark order on surviving pinned tabs ──────────────
+    this._enforceTabOrder(sf, ws, dryRecord, result);
+  }
+
+  /**
+   * Reorder surviving pinned tabs in a space to match bookmark order.
+   *
+   * Flattens the bookmark tree (sf.pinned) into a DFS-ordered list of
+   * {url, folderPath} entries, pool-matches them to live tabs, and uses
+   * gBrowser.moveTabTo to fix any ordering mismatches.
+   */
+  _enforceTabOrder(sf, ws, dryRecord, result) {
+    const win            = this.manager.window;
+    const gBrowser       = win.gBrowser;
+    const gZenWorkspaces = win.gZenWorkspaces;
+
+    // Build desired flat URL order from bookmark tree (DFS).
+    const desiredOrder = [];
+    const flatten = (item, folderPath) => {
+      if (item.type === "bookmark") {
+        if (item.url && !this._isBlankUrl(item.url)) {
+          desiredOrder.push({ url: item.url, folderPath });
+        }
+      } else if (item.type === "folder") {
+        const childPath = folderPath ? folderPath + "/" + item.title : item.title;
+        for (const child of item.children ?? []) {
+          flatten(child, childPath);
+        }
+      }
+    };
+    for (const item of sf.pinned) {
+      flatten(item, null);
+    }
+
+    if (desiredOrder.length <= 1) return;
+
+    // Collect surviving pinned tabs in this space, sorted by current _tPos.
+    const allTabs   = gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
+    const spaceTabs = Array.from(allTabs).filter(
+      t => t.pinned &&
+           !t.hasAttribute("zen-essential") &&
+           t.getAttribute("zen-workspace-id") === ws.uuid
+    ).sort((a, b) => (a._tPos ?? 0) - (b._tPos ?? 0));
+
+    if (spaceTabs.length <= 1) return;
+
+    // Pool-match desired order → surviving tabs.
+    const tabPool = spaceTabs.map(t => ({
+      tab:        t,
+      url:        this.getPinnedUrl(t) ?? "",
+      folderPath: (() => {
+        const fp = this._getTabFolderPath(t);
+        return fp ? fp.join("/") : null;
+      })(),
+      consumed: false,
+    }));
+
+    const orderedTabs = [];
+    for (const desired of desiredOrder) {
+      const idx = tabPool.findIndex(
+        tp => !tp.consumed && tp.url === desired.url && tp.folderPath === desired.folderPath
+      );
+      if (idx !== -1) {
+        tabPool[idx].consumed = true;
+        orderedTabs.push(tabPool[idx].tab);
+      }
+    }
+
+    if (orderedTabs.length <= 1) return;
+
+    // Check if already in correct order.
+    let alreadyCorrect = orderedTabs.length === spaceTabs.length;
+    if (alreadyCorrect) {
+      for (let i = 0; i < orderedTabs.length; i++) {
+        if (spaceTabs[i] !== orderedTabs[i]) {
+          alreadyCorrect = false;
+          break;
+        }
+      }
+    }
+    if (alreadyCorrect) return;
+
+    const desc = `Reorder ${orderedTabs.length} pinned tab(s) in space "${sf.name}" to match bookmark order`;
+    if (dryRecord("updated", "reorder-tabs", desc, { space: sf.name, count: orderedTabs.length })) {
+      const startPos = Math.min(...spaceTabs.map(t => t._tPos ?? 0));
+      for (let i = 0; i < orderedTabs.length; i++) {
+        try {
+          gBrowser.moveTabTo(orderedTabs[i], { tabIndex: startPos + i });
+        } catch (e) {
+          result.errors.push(`reorder tab in "${sf.name}": ${e.message}`);
+        }
+      }
+      result.updated++;
+      this.log(`Reordered ${orderedTabs.length} tabs in space "${sf.name}"`);
+    }
   }
 
   /**
