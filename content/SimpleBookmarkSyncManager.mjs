@@ -1411,43 +1411,44 @@ export class SimpleBookmarkSyncManager {
       }
     } else {
       // ── Root level ──────────────────────────────────────────────
-      // Separate tabs from folders — tabs use moveTabTo, folders use
-      // pinnedTabsContainer DOM if available.
-      const rootTabs    = orderedRefs.filter(r => !r.isZenFolder);
-      const rootFolders = orderedRefs.filter(r => r.isZenFolder);
+      // Use pinnedTabsContainer.appendChild for ALL items (tabs + folders
+      // together) to preserve interleaved bookmark order.
+      const pinnedContainer = gZenWorkspaces?.workspaceElement?.(ws.uuid)?.pinnedTabsContainer;
+      if (pinnedContainer?.appendChild) {
+        const currentItems = pinnedContainer._children
+          ? pinnedContainer._children.filter(c => !c._emptyTab)
+          : [];
 
-      // Reorder root-level tabs.
-      if (rootTabs.length > 1) {
-        const sortedByPos = [...rootTabs].sort((a, b) => (a._tPos ?? 0) - (b._tPos ?? 0));
-        if (!this._isOrderCorrect(sortedByPos, rootTabs)) {
-          const desc = `Reorder ${rootTabs.length} root pinned tab(s) in space "${spaceName}"`;
-          if (dryRecord("updated", "reorder-tabs", desc, { space: spaceName, count: rootTabs.length })) {
-            const startPos = Math.min(...sortedByPos.map(t => t._tPos ?? 0));
-            for (let i = 0; i < rootTabs.length; i++) {
-              try {
-                gBrowser.moveTabTo(rootTabs[i], { tabIndex: startPos + i });
-              } catch (e) {
-                result.errors.push(`reorder root tab in "${spaceName}": ${e.message}`);
-              }
+        if (!this._isOrderCorrect(currentItems, orderedRefs)) {
+          const desc = `Reorder ${orderedRefs.length} root item(s) in space "${spaceName}"`;
+          if (dryRecord("updated", "reorder-tabs", desc,
+            { space: spaceName, count: orderedRefs.length })) {
+            for (const ref of orderedRefs) {
+              pinnedContainer.appendChild(ref);
             }
             result.updated++;
-            this.log(`Reordered ${rootTabs.length} root tabs in space "${spaceName}"`);
+            this.log(`Reordered ${orderedRefs.length} root items in space "${spaceName}"`);
           }
         }
-      }
-
-      // Reorder root-level folders using pinnedTabsContainer if available.
-      if (rootFolders.length > 1) {
-        const pinnedContainer = gZenWorkspaces?.workspaceElement?.(ws.uuid)?.pinnedTabsContainer;
-        if (pinnedContainer?.appendChild) {
-          const desc = `Reorder ${rootFolders.length} root folder(s) in space "${spaceName}"`;
-          if (dryRecord("updated", "reorder-folders", desc,
-            { space: spaceName, count: rootFolders.length })) {
-            for (const folder of rootFolders) {
-              pinnedContainer.appendChild(folder);
+      } else {
+        // Fallback: no pinnedTabsContainer — reorder tabs only via moveTabTo.
+        const rootTabs = orderedRefs.filter(r => !r.isZenFolder);
+        if (rootTabs.length > 1) {
+          const sortedByPos = [...rootTabs].sort((a, b) => (a._tPos ?? 0) - (b._tPos ?? 0));
+          if (!this._isOrderCorrect(sortedByPos, rootTabs)) {
+            const desc = `Reorder ${rootTabs.length} root pinned tab(s) in space "${spaceName}"`;
+            if (dryRecord("updated", "reorder-tabs", desc, { space: spaceName, count: rootTabs.length })) {
+              const startPos = Math.min(...sortedByPos.map(t => t._tPos ?? 0));
+              for (let i = 0; i < rootTabs.length; i++) {
+                try {
+                  gBrowser.moveTabTo(rootTabs[i], { tabIndex: startPos + i });
+                } catch (e) {
+                  result.errors.push(`reorder root tab in "${spaceName}": ${e.message}`);
+                }
+              }
+              result.updated++;
+              this.log(`Reordered ${rootTabs.length} root tabs in space "${spaceName}"`);
             }
-            result.updated++;
-            this.log(`Reordered ${rootFolders.length} root folders in space "${spaceName}"`);
           }
         }
       }
@@ -1487,22 +1488,9 @@ export class SimpleBookmarkSyncManager {
     );
     const subFolders = (folderEntry.children ?? []).filter(c => c.type === "folder");
 
-    if (directBookmarks.length === 0 && subFolders.length === 0) return;
-
-    // Match direct bookmarks against the live pool.
-    const toCreate = [];
-    for (const bm of directBookmarks) {
-      const idx = livePool.findIndex(
-        lp => !lp.matched && lp.url === bm.url && lp.folderPath === folderPath
-      );
-      if (idx !== -1) {
-        livePool[idx].matched = true;
-      } else {
-        toCreate.push(bm);
-      }
-    }
-
-    // Resolve or create the Zen folder reference.
+    // Resolve the existing Zen folder reference BEFORE the early-return check
+    // so that even empty folders (no bookmarks, no sub-folders) get their ref
+    // returned for ordering purposes.
     let folderRef = null;
 
     // Look for an existing Zen folder matching the full path in this workspace.
@@ -1529,6 +1517,21 @@ export class SimpleBookmarkSyncManager {
         }
       }
       if (folderRef) break;
+    }
+
+    if (directBookmarks.length === 0 && subFolders.length === 0) return folderRef;
+
+    // Match direct bookmarks against the live pool.
+    const toCreate = [];
+    for (const bm of directBookmarks) {
+      const idx = livePool.findIndex(
+        lp => !lp.matched && lp.url === bm.url && lp.folderPath === folderPath
+      );
+      if (idx !== -1) {
+        livePool[idx].matched = true;
+      } else {
+        toCreate.push(bm);
+      }
     }
 
     if (toCreate.length > 0) {

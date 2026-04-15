@@ -1678,18 +1678,20 @@ describe("syncBookmarksToTabs — tab ordering matches bookmark order", () => {
     store.set("bm-b",     { guid: "bm-b",     parentGuid: "ws",       type: "bookmark", title: "Beta",             url: "https://beta.com" });
     store.set("bm-g",     { guid: "bm-g",     parentGuid: "ws",       type: "bookmark", title: "Gamma",            url: "https://gamma.com" });
 
-    // Live tabs exist but in WRONG order: gamma(0), alpha(1), beta(2)
+    // Live tabs exist but in WRONG order: gamma, alpha, beta
     const tGamma = makeTab({ url: "https://gamma.com", pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
-    tGamma._tPos = 0;
     const tAlpha = makeTab({ url: "https://alpha.com", pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
-    tAlpha._tPos = 1;
     const tBeta  = makeTab({ url: "https://beta.com",  pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
-    tBeta._tPos = 2;
 
-    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+    const gzw = makeGZenWorkspaces(
       [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
       [tGamma, tAlpha, tBeta]
     );
+    mgr.window.gZenWorkspaces = gzw;
+
+    // Seed pinnedTabsContainer with wrong order
+    const pc = gzw.workspaceElement("uuid-work").pinnedTabsContainer;
+    pc._children.push(tGamma, tAlpha, tBeta);
 
     const sm = new SimpleBookmarkSyncManager(mgr);
     const result = await sm.syncBookmarksToTabs();
@@ -1698,10 +1700,10 @@ describe("syncBookmarksToTabs — tab ordering matches bookmark order", () => {
     assert.equal(result.deleted, 0, "no tabs deleted");
     assert.ok(result.updated >= 1, "reorder counted as update");
 
-    // After reorder: alpha=0, beta=1, gamma=2
-    assert.equal(tAlpha._tPos, 0, "alpha must be at position 0");
-    assert.equal(tBeta._tPos, 1,  "beta must be at position 1");
-    assert.equal(tGamma._tPos, 2, "gamma must be at position 2");
+    // After reorder: alpha, beta, gamma
+    assert.equal(pc._children[0], tAlpha, "alpha first");
+    assert.equal(pc._children[1], tBeta,  "beta second");
+    assert.equal(pc._children[2], tGamma, "gamma third");
   });
 
   test("tabs already in correct order are not reordered", async () => {
@@ -1716,14 +1718,17 @@ describe("syncBookmarksToTabs — tab ordering matches bookmark order", () => {
 
     // Live tabs already in correct order
     const tAlpha = makeTab({ url: "https://alpha.com", pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
-    tAlpha._tPos = 0;
     const tBeta  = makeTab({ url: "https://beta.com",  pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
-    tBeta._tPos = 1;
 
-    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+    const gzw = makeGZenWorkspaces(
       [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
       [tAlpha, tBeta]
     );
+    mgr.window.gZenWorkspaces = gzw;
+
+    // Seed pinnedTabsContainer with correct order
+    const pc = gzw.workspaceElement("uuid-work").pinnedTabsContainer;
+    pc._children.push(tAlpha, tBeta);
 
     const sm = new SimpleBookmarkSyncManager(mgr);
     const result = await sm.syncBookmarksToTabs();
@@ -1731,42 +1736,62 @@ describe("syncBookmarksToTabs — tab ordering matches bookmark order", () => {
     assert.equal(result.updated, 0, "no reorder needed — already correct");
   });
 
-  test("folder tabs are NOT moved — only root tabs are reordered", async () => {
+  test("interleaved root tabs and folders preserve bookmark order", async () => {
     const mgr   = makeManager();
     const store = mgr.window.PlacesUtils.bookmarks._store;
     store.clear();
-    // Bookmark order: bm-1, FolderA(bm-2), bm-3
+    // Bookmark order: URL1, URL2, FolderA(URL3), FolderB(URL4), FolderC(URL5), URL6
     store.set("toolbar",   { guid: "toolbar",   parentGuid: null,        type: "folder",   title: "Bookmarks Toolbar", url: null });
     store.set("zt",        { guid: "zt",        parentGuid: "toolbar",   type: "folder",   title: "ZenTabs",          url: null });
     store.set("ws",        { guid: "ws",        parentGuid: "zt",        type: "folder",   title: "Work",             url: null });
-    store.set("bm-1",      { guid: "bm-1",      parentGuid: "ws",        type: "bookmark", title: "First",            url: "https://first.com" });
+    store.set("bm-1",      { guid: "bm-1",      parentGuid: "ws",        type: "bookmark", title: "URL1",             url: "https://one.com" });
+    store.set("bm-2",      { guid: "bm-2",      parentGuid: "ws",        type: "bookmark", title: "URL2",             url: "https://two.com" });
     store.set("folder-a",  { guid: "folder-a",  parentGuid: "ws",        type: "folder",   title: "FolderA",          url: null });
-    store.set("bm-2",      { guid: "bm-2",      parentGuid: "folder-a",  type: "bookmark", title: "InFolder",         url: "https://infolder.com" });
-    store.set("bm-3",      { guid: "bm-3",      parentGuid: "ws",        type: "bookmark", title: "Last",             url: "https://last.com" });
+    store.set("bm-3",      { guid: "bm-3",      parentGuid: "folder-a",  type: "bookmark", title: "URL3",             url: "https://three.com" });
+    store.set("folder-b",  { guid: "folder-b",  parentGuid: "ws",        type: "folder",   title: "FolderB",          url: null });
+    store.set("bm-4",      { guid: "bm-4",      parentGuid: "folder-b",  type: "bookmark", title: "URL4",             url: "https://four.com" });
+    store.set("folder-c",  { guid: "folder-c",  parentGuid: "ws",        type: "folder",   title: "FolderC",          url: null });
+    store.set("bm-5",      { guid: "bm-5",      parentGuid: "folder-c",  type: "bookmark", title: "URL5",             url: "https://five.com" });
+    store.set("bm-6",      { guid: "bm-6",      parentGuid: "ws",        type: "bookmark", title: "URL6",             url: "https://six.com" });
 
-    // Live tabs in WRONG root order: last(0), infolder(1 — in folder), first(2)
-    const tLast     = makeTab({ url: "https://last.com",     pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
-    tLast._tPos = 0;
-    const tInFolder = makeTab({ url: "https://infolder.com", pinned: true, attrs: { "zen-workspace-id": "uuid-work", "zentabs-folder-path": "FolderA" } });
-    tInFolder._tPos = 1;
-    const tFirst    = makeTab({ url: "https://first.com",    pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
-    tFirst._tPos = 2;
+    // Live tabs
+    const t1 = makeTab({ url: "https://one.com",   pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
+    const t2 = makeTab({ url: "https://two.com",   pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
+    const t3 = makeTab({ url: "https://three.com", pinned: true, attrs: { "zen-workspace-id": "uuid-work", "zentabs-folder-path": "FolderA" } });
+    const t4 = makeTab({ url: "https://four.com",  pinned: true, attrs: { "zen-workspace-id": "uuid-work", "zentabs-folder-path": "FolderB" } });
+    const t5 = makeTab({ url: "https://five.com",  pinned: true, attrs: { "zen-workspace-id": "uuid-work", "zentabs-folder-path": "FolderC" } });
+    const t6 = makeTab({ url: "https://six.com",   pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
 
-    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+    // Create mock Zen folders
+    const gZenFolders = makeGZenFolders([]);
+    const folderA = gZenFolders.createFolder([t3], { label: "FolderA", workspaceId: "uuid-work" });
+    const folderB = gZenFolders.createFolder([t4], { label: "FolderB", workspaceId: "uuid-work" });
+    const folderC = gZenFolders.createFolder([t5], { label: "FolderC", workspaceId: "uuid-work" });
+    mgr.window.gZenFolders = gZenFolders;
+
+    const gzw = makeGZenWorkspaces(
       [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
-      [tLast, tInFolder, tFirst]
+      [t1, t2, t3, t4, t5, t6]
     );
+    mgr.window.gZenWorkspaces = gzw;
+
+    // Seed pinnedTabsContainer in WRONG order: all URLs grouped, then folders
+    const pc = gzw.workspaceElement("uuid-work").pinnedTabsContainer;
+    pc._children.push(t1, t2, t6, folderA, folderB, folderC);
 
     const sm = new SimpleBookmarkSyncManager(mgr);
     const result = await sm.syncBookmarksToTabs();
     assert.equal(result.errors.length, 0);
+    assert.equal(result.created, 0, "no new tabs created");
+    assert.equal(result.deleted, 0, "no tabs deleted");
 
-    // Root tabs (first, last) reordered: first→0, last→1
-    assert.equal(tFirst._tPos, 0, "first root tab at position 0");
-    assert.equal(tLast._tPos, 1,  "last root tab at position 1");
-
-    // Folder tab must NOT have been moved — stays at original position
-    assert.equal(tInFolder._tPos, 1, "folder tab position unchanged (not moved by reorder)");
+    // After reorder: t1, t2, folderA, folderB, folderC, t6
+    assert.equal(pc._children[0], t1,      "URL1 first");
+    assert.equal(pc._children[1], t2,      "URL2 second");
+    assert.equal(pc._children[2], folderA, "FolderA third");
+    assert.equal(pc._children[3], folderB, "FolderB fourth");
+    assert.equal(pc._children[4], folderC, "FolderC fifth");
+    assert.equal(pc._children[5], t6,      "URL6 sixth (after folders)");
   });
 
   test("dry-run reports reorder action without moving tabs", async () => {
@@ -1781,14 +1806,17 @@ describe("syncBookmarksToTabs — tab ordering matches bookmark order", () => {
 
     // Wrong order
     const tBeta  = makeTab({ url: "https://beta.com",  pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
-    tBeta._tPos = 0;
     const tAlpha = makeTab({ url: "https://alpha.com", pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
-    tAlpha._tPos = 1;
 
-    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+    const gzw = makeGZenWorkspaces(
       [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
       [tBeta, tAlpha]
     );
+    mgr.window.gZenWorkspaces = gzw;
+
+    // Seed pinnedTabsContainer with wrong order
+    const pc = gzw.workspaceElement("uuid-work").pinnedTabsContainer;
+    pc._children.push(tBeta, tAlpha);
 
     const sm = new SimpleBookmarkSyncManager(mgr);
     const result = await sm.syncBookmarksToTabs({ dryRun: true });
@@ -1796,8 +1824,8 @@ describe("syncBookmarksToTabs — tab ordering matches bookmark order", () => {
     assert.ok(result.updated >= 1, "dry-run counts reorder as updated");
 
     // Tabs should NOT have been moved
-    assert.equal(tBeta._tPos, 0,  "beta stays at 0 in dry-run");
-    assert.equal(tAlpha._tPos, 1, "alpha stays at 1 in dry-run");
+    assert.equal(pc._children[0], tBeta,  "beta stays first in dry-run");
+    assert.equal(pc._children[1], tAlpha, "alpha stays second in dry-run");
 
     // Plan should include a reorder action
     const reorderAction = result.plan.find(p => p.action === "reorder-tabs");
