@@ -14,7 +14,6 @@ class ZenTabsManager {
     this.window = null;
     this.preferences = {};
     this.tabManager = null;
-    this.syncManager = null;
     this.cleanupManager = null;
     this.simpleBookmarkSyncManager = null;
     this.uiManager = null;
@@ -117,7 +116,7 @@ class ZenTabsManager {
   async initializeManagers() {
     console.log("[ZenTabs] Loading managers...");
 
-    // Make ContextualIdentityService available for SyncManager's container helpers.
+    // Make ContextualIdentityService available for SimpleBookmarkSyncManager's container helpers.
     // Must happen here (chrome script scope) because dynamic-import ESM modules
     // cannot reliably call ChromeUtils.importESModule themselves.
     try {
@@ -132,15 +131,11 @@ class ZenTabsManager {
     }
 
     const { TabManager } = await import("../content/TabManager.mjs");
-    const { SyncManager } = await import("../content/SyncManager.mjs");
     const { CleanupManager } = await import("../content/CleanupManager.mjs");
     const { SimpleBookmarkSyncManager } = await import("../content/SimpleBookmarkSyncManager.mjs");
     
     this.tabManager = new TabManager(this);
     await this.tabManager.init();
-    
-    this.syncManager = new SyncManager(this);
-    await this.syncManager.init();
     
     this.cleanupManager = new CleanupManager(this);
     await this.cleanupManager.init();
@@ -175,12 +170,7 @@ class ZenTabsManager {
   }
 
   startBackgroundTasks() {
-    const { syncEnabled, syncInterval, cleanupEnabled, memoryOptimization, autoUnloadEnabled } = this.preferences;
-    
-    if (syncEnabled && syncInterval > 0) {
-      this.syncInterval = this.window.setInterval(() => 
-        this.syncManager.performSync(), syncInterval * 1000);
-    }
+    const { cleanupEnabled, memoryOptimization, autoUnloadEnabled } = this.preferences;
     
     if (cleanupEnabled) {
       this.cleanupInterval = this.window.setInterval(() => 
@@ -202,10 +192,6 @@ class ZenTabsManager {
   async loadPreferences() {
     const defaults = {
       enabled: true,
-      syncEnabled: true,
-      syncDirection: "bidirectional",
-      syncInterval: 300,
-      syncCloseRemovedTabs: false,
       paused: false,
       cleanupEnabled: false,
       cleanupAge: 7,
@@ -256,10 +242,8 @@ class ZenTabsManager {
 
   pause() {
     this.preferences.paused = true;
-    this.window?.clearInterval(this.syncInterval);
     this.window?.clearInterval(this.cleanupInterval);
     this.window?.clearInterval(this.memoryInterval);
-    this.syncInterval = null;
     this.cleanupInterval = null;
     this.memoryInterval = null;
     this.dispatchEvent("paused", {});
@@ -287,13 +271,11 @@ class ZenTabsManager {
   }
 
   async shutdown() {
-    this.window?.clearInterval(this.syncInterval);
     this.window?.clearInterval(this.cleanupInterval);
     this.window?.clearInterval(this.memoryInterval);
     
     await this.uiManager?.shutdown();
     await this.cleanupManager?.shutdown();
-    await this.syncManager?.shutdown();
     await this.tabManager?.shutdown();
     
     this.initialized = false;

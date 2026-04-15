@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-ZenTabs Manager is a **Zen Browser mod** that provides advanced tab management: bi-directional bookmark sync, automatic cleanup, memory optimization, and a toolbar UI. It is distributed via the [Sine mod loader](https://github.com/CosmoCreeper/Sine) and requires the "External marketplace" option enabled in Sine settings.
+ZenTabs Manager is a **Zen Browser mod** that provides advanced tab management: bookmark sync, automatic cleanup, memory optimization, and a toolbar UI. It is distributed via the [Sine mod loader](https://github.com/CosmoCreeper/Sine) and requires the "External marketplace" option enabled in Sine settings.
 
 ## Runtime Environment
 
@@ -46,7 +46,7 @@ ZenTabsManager/
 │   └── zen.api.mjs         # Public API (ZenTabsAPI) exposed on window
 └── content/
     ├── TabManager.mjs      # Tab enumeration, metadata cache, filtering
-    ├── SyncManager.mjs     # Bi-directional bookmark sync via PlacesUtils
+    ├── SimpleBookmarkSyncManager.mjs  # Idempotent bookmark sync (tabs↔bookmarks)
     ├── CleanupManager.mjs  # Age-based cleanup and memory optimization
     └── UI.mjs              # Toolbar button (XUL), dropdown menu, keyboard shortcuts
 ```
@@ -60,14 +60,14 @@ ZenTabsManager/
 1. Sine loads `engine/zen.sys.mjs` as the entry point (declared in `theme.json` under `scripts`).
 2. A `WeakMap<window, ZenTabsManager>` (`windowManagers`) stores one `ZenTabsManager` instance **per chrome window**. When Sine calls the entry point for a window, a new instance is created and stored in the map.
 3. `init(win)` loads preferences from `Services.prefs`, waits for `gBrowser` to be ready, then dynamically imports managers.
-4. Managers are initialized sequentially: `TabManager` → `SyncManager` → `CleanupManager` → `UIManager`.
+4. Managers are initialized sequentially: `TabManager` → `SimpleBookmarkSyncManager` → `CleanupManager` → `UIManager`.
 5. `window.ZenTabsManager` and `window.ZenTabsAPI` are set on the chrome window for console access.
 
 ### Class Responsibilities
 
 - **`ZenTabsManager`** (`zen.sys.mjs`): Central coordinator. Owns preferences, event bus (`EventTarget`), window reference, and manager instances. Background intervals live here.
 - **`TabManager`** (`content/TabManager.mjs`): Maintains an in-memory `Map<tab, metadata>` cache. Extracts type/state/workspace/folder/URL from each tab. Provides `getAllTabs()`, `getTabsFiltered(filters)`, `getStatistics()`.
-- **`SyncManager`** (`content/SyncManager.mjs`): Manifest-based 3-way bookmark sync. Maintains a `syncManifest` (stored in `zentabs.syncManifest` pref) as an array of `{url, guid, folder, type}` entry objects per space, tracking individual tab↔bookmark pairings by bookmark GUID. Duplicate URLs are fully supported — URL is never used as a unique key. Uses pool-based matching to pair tabs with bookmarks 1:1. Uses `getBookmarkFolderForTab()` to mirror Zen folder hierarchy under `Zen/<SpaceName>/`. Uses `PlacesUtils.promiseBookmarksTree()`.
+- **`SimpleBookmarkSyncManager`** (`content/SimpleBookmarkSyncManager.mjs`): Idempotent overwrite-based bookmark sync. Stores bookmarks under `ZenTabs/<SpaceName>/` with optional space metadata annotations. Supports `syncTabsToBookmarks()` (tabs → bookmarks) and `syncBookmarksToTabs()` (bookmarks → tabs, with optional dry-run). Uses pool-based matching. No manifest required.
 - **`CleanupManager`** (`content/CleanupManager.mjs`): Age-based tab closure and memory optimization. Also supports **auto-unload of idle tabs** (`unloadStaleTabs()`) based on `autoUnloadDelay`. Memory reporting uses `ChromeUtils.requestProcInfo()` and `Services.sysinfo`. Respects `keepEssentialTabs` and `keepPinnedTabs` preferences.
 - **`UIManager`** (`content/UI.mjs`): Creates a XUL `toolbarbutton` in `#nav-bar` with a `menupopup`. Registers keyboard shortcuts via `document.addEventListener("keydown", ...)`.
 - **`ZenTabsAPI`** (`zen.api.mjs`): Thin facade over `window.ZenTabsManager`. All methods guard against uninitialized state.
@@ -85,8 +85,9 @@ Core events:
 | `tab-removed` | A tab was closed |
 | `tab-updated` | Tab metadata changed |
 | `cleanup-completed` | Age-based cleanup run finished |
-| `sync-completed` | Sync operation succeeded |
-| `sync-failed` | Sync operation threw an error |
+| `simple-sync-started` | Tabs-to-bookmarks sync began |
+| `simple-sync-completed` | Tabs-to-bookmarks sync succeeded |
+| `simple-sync-failed` | Tabs-to-bookmarks sync threw an error |
 | `memory-optimized` | Memory optimization pass finished |
 | `tabs-auto-unloaded` | Idle-tab unload pass finished |
 | `paused` | Manager was paused |
@@ -138,28 +139,26 @@ const tabs = window.gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
 
 **Per-space bookmarks**: `window.ZenWorkspaceBookmarksStorage` manages a SQLite table `zen_bookmarks_workspaces(bookmark_guid, workspace_uuid)` that associates bookmarks with specific spaces. Use `getBookmarkWorkspaces(guid)` and `getBookmarkGuidsByWorkspace()` to query it.
 
-### Sync Strategy (Manifest-based 3-way merge)
+### Sync Strategy (Idempotent overwrite)
 
-`SyncManager` does not do a simple push or pull. It performs a **3-way merge** using a persistent manifest:
+`SimpleBookmarkSyncManager` performs a full idempotent overwrite sync — no manifest or 3-way merge needed:
 
-- **Manifest** (`zentabs.syncManifest` pref): A JSON map of `spaceUuid → Array<{url, guid, folder, type}>`. Each entry represents a single tab↔bookmark pairing agreed on at the end of the last sync. `guid` is the Places bookmark GUID; duplicates of the same URL are separate entries.
-- **No URL-based dedup**: Duplicate URLs are valid everywhere — within the same space, folder, or subfolder. The sync operates on individual bookmark entries (identified by GUID) and tab instances, using pool-based matching to pair them 1:1.
-- On each sync, the manifest entries are compared against the current bookmark tree (B = bookmarks) and the live tabs (T = tab state) to decide what to add, remove, or leave alone. Count-based comparison handles duplicates correctly.
-- `loadManifest()` / `saveManifest()` read and write this JSON string from/to prefs. Legacy v1 manifests (URL sets) are auto-discarded on load, triggering a clean bootstrap sync.
-
-**Pool-based matching**: In all three sync modes (`syncToBookmarks`, `syncFromBookmarks`, `syncBidirectional`), tabs and bookmarks are matched by URL using consumable pools. Each match consumes one entry from each side. Unmatched items drive creation/deletion decisions. This allows N tabs with URL X to correctly produce N bookmarks with URL X.
+- **Tabs → Bookmarks** (`syncTabsToBookmarks()`): Reads all live tabs, groups by space, and writes the complete bookmark tree under `ZenTabs/<SpaceName>/`. Existing bookmarks are matched by URL and updated; extras are deleted; missing ones are created.
+- **Bookmarks → Tabs** (`syncBookmarksToTabs(options)`): Reads the `ZenTabs/` bookmark tree and opens missing tabs, optionally closing tabs not represented in bookmarks. Supports `{ dryRun: true }` to preview changes without mutating.
+- Space metadata (icon, theme) is stored as a JSON annotation bookmark (`__meta__`) inside each space folder.
 
 ### Bookmark Folder Structure
 
-Bookmarks are organized under a **`Zen/`** root folder, then by space name, then mirroring the tab's Zen folder hierarchy:
+Bookmarks are organized under a **`ZenTabs/`** root folder, then by space name, then mirroring the tab's Zen folder hierarchy:
 
 ```
-Zen/
+ZenTabs/
 └── <SpaceName>/
+    ├── __meta__               ← JSON annotation with space icon/theme
     ├── <direct bookmark>      ← pinned tab with no Zen folder
-    ├── <FolderName>/          ← pinned tab WITH a Zen folder (folder IS the Zen folder)
-    ├── Essentials/            ← essential tabs with no Zen folder
-    └── Temporary tabs/        ← normal tabs with no Zen folder
+    ├── <FolderName>/          ← pinned tab WITH a Zen folder
+    ├── Essentials/            ← essential tabs
+    └── Temporary tabs/        ← normal tabs
 ```
 
 Type is fully recoverable on restore:
@@ -185,10 +184,6 @@ Stored under `Services.prefs.getBranch("zentabs.")` as a JSON string in `"prefer
 | Preference | Default | Description |
 |---|---|---|
 | `enabled` | `true` | Master on/off switch |
-| `syncEnabled` | `true` | Enable bookmark sync |
-| `syncDirection` | `"bidirectional"` | `"toBookmarks"`, `"fromBookmarks"`, or `"bidirectional"` |
-| `syncInterval` | `300` | Seconds between automatic sync runs |
-| `syncCloseRemovedTabs` | `false` | Close tabs that were removed from bookmarks during sync |
 | `paused` | `false` | Whether the manager is currently paused |
 | `cleanupEnabled` | `false` | Enable age-based tab cleanup |
 | `cleanupAge` | `7` | Age threshold for cleanup (in `cleanupAgeUnit` units) |
@@ -219,7 +214,7 @@ await ZenTabsAPI.listAllTabs()                   // full tab metadata array
 await ZenTabsAPI.getTabsFiltered({ olderThan: 7, type: 'normal' })
 await ZenTabsAPI.syncToBookmarks()
 await ZenTabsAPI.syncFromBookmarks()
-await ZenTabsAPI.syncBidirectional()
+await ZenTabsAPI.syncFromBookmarks({ dryRun: true })
 await ZenTabsAPI.cleanupOldTabs({ maxAge: 7, dryRun: true })
 await ZenTabsAPI.optimizeMemory({ force: true })
 await ZenTabsAPI.getStatistics()
@@ -277,7 +272,7 @@ All approved feature specs live in the `specs/` directory. Consult the relevant 
 
 | Spec file | Feature | Status |
 |---|---|---|
-| `specs/SimpleBookmarkSync.spec.md` | One-way tab-to-bookmark sync (`SimpleBookmarkSyncManager`) | Approved — ready for implementation |
+| `specs/SimpleBookmarkSync.spec.md` | Idempotent tab-to-bookmark sync (`SimpleBookmarkSyncManager`) | Implemented |
 | `specs/SpaceMetadataSync.spec.md` | Space icon/theme metadata in bookmarks + rename detection | Implemented — 2026-04-14 |
 | `specs/BookmarksToTabsSync.spec.md` | Reverse sync: bookmarks → tabs with dry-run mode | Implemented — 2026-04-14 |
 
@@ -305,7 +300,6 @@ All approved feature specs live in the `specs/` directory. Consult the relevant 
 ### File mapping
 | Source file | Test file |
 |---|---|
-| `content/SyncManager.mjs` | `tests/SyncManager.test.mjs` |
 | `content/SimpleBookmarkSyncManager.mjs` | `tests/SimpleBookmarkSyncManager.test.mjs` |
 | `content/TabManager.mjs` | `tests/TabManager.test.mjs` |
 | `content/CleanupManager.mjs` | `tests/CleanupManager.test.mjs` |

@@ -455,10 +455,6 @@ export function makeManager({
 
   const defaultPrefs = {
     enabled:              true,
-    syncEnabled:          true,
-    syncDirection:        "bidirectional",
-    syncInterval:         0,
-    syncCloseRemovedTabs: false,
     cleanupEnabled:       false,
     cleanupAge:           7,
     cleanupAgeUnit:       "days",

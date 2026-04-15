@@ -61,14 +61,10 @@ export class UIManager {
 
       // Add menu items
       this.addMenuItem(popup, "List All Tabs", () => this.listAllTabs(), "Cmd+Shift+L");
-      this.addMenuItem(popup, "Sync to Bookmarks", () => this.syncToBookmarks(), "Cmd+Shift+B");
+      this.addMenuItem(popup, "Sync to Bookmarks", () => this.simpleSyncToBookmarks(), "Cmd+Shift+B");
       this.addMenuSeparator(popup);
-      this.addMenuItem(popup, "Sync from Bookmarks", () => this.syncFromBookmarks());
-      this.addMenuItem(popup, "Bidirectional Sync", () => this.syncBidirectional());
-      this.addMenuSeparator(popup);
-      this.addMenuItem(popup, "New Sync \u2014 To Bookmarks", () => this.simpleSyncToBookmarks());
-      this.addMenuItem(popup, "New Sync \u2014 From Bookmarks", () => this.simpleSyncFromBookmarks());
-      this.addMenuItem(popup, "New Sync \u2014 From Bookmarks (dry)", () => this.simpleSyncFromBookmarksDryRun());
+      this.addMenuItem(popup, "Restore from Bookmarks", () => this.simpleSyncFromBookmarks());
+      this.addMenuItem(popup, "Restore from Bookmarks (dry run)", () => this.simpleSyncFromBookmarksDryRun());
       this.addMenuSeparator(popup);
       this.addMenuItem(popup, "Cleanup Old Tabs", () => this.cleanupOldTabs());
       this.addMenuItem(popup, "Optimize Memory", () => this.optimizeMemory());
@@ -140,7 +136,7 @@ export class UIManager {
           this.listAllTabs();
         } else if (event.key === 'B') {
           event.preventDefault();
-          this.syncToBookmarks();
+          this.simpleSyncToBookmarks();
         } else if (event.key === 'M') {
           event.preventDefault();
           this.optimizeMemory();
@@ -194,36 +190,6 @@ export class UIManager {
     });
     
     console.log("=".repeat(80) + "\n");
-  }
-
-  async syncToBookmarks() {
-    console.log("🔖 Syncing tabs to bookmarks...");
-    const prev = this.manager.preferences.syncDirection;
-    this.manager.preferences.syncDirection = "tabs-to-bookmarks";
-    const result = await this.manager.syncManager.performSync({ force: true });
-    this.manager.preferences.syncDirection = prev;
-    console.log("✅ Sync complete:", result);
-    this.showNotification("Sync Complete", `Created ${result?.bookmarksCreated ?? 0}, updated ${result?.bookmarksUpdated ?? 0} bookmarks`);
-  }
-
-  async syncFromBookmarks() {
-    console.log("📥 Syncing bookmarks to tabs...");
-    const prev = this.manager.preferences.syncDirection;
-    this.manager.preferences.syncDirection = "bookmarks-to-tabs";
-    const result = await this.manager.syncManager.performSync({ force: true });
-    this.manager.preferences.syncDirection = prev;
-    console.log("✅ Sync complete:", result);
-    this.showNotification("Sync Complete", `Created ${result?.tabsCreated ?? 0} tabs, ${result?.tabsExisting ?? 0} already open`);
-  }
-
-  async syncBidirectional() {
-    console.log("🔄 Performing bidirectional sync...");
-    const prev = this.manager.preferences.syncDirection;
-    this.manager.preferences.syncDirection = "bidirectional";
-    const result = await this.manager.syncManager.performSync({ force: true });
-    this.manager.preferences.syncDirection = prev;
-    console.log("✅ Bidirectional sync complete:", result);
-    this.showNotification("Bidirectional Sync", `Bookmarks: +${result?.bookmarksCreated ?? 0}, Tabs opened: +${result?.tabsOpened ?? 0}`);
   }
 
   async simpleSyncFromBookmarks() {
@@ -348,23 +314,6 @@ export class UIManager {
     const prefs = this.manager.getPreferences();
 
     const fields = [
-      {
-        key: "syncEnabled", label: "Enable bookmark sync", type: "checkbox",
-        tooltip: "When enabled, ZenTabs will synchronise your essential and pinned tabs with a bookmark folder called 'Zen' on your toolbar. These bookmarks are then synced across computers via Firefox Sync."
-      },
-      {
-        key: "syncDirection", label: "Sync direction", type: "select",
-        options: ["tabs-to-bookmarks", "bookmarks-to-tabs", "bidirectional"],
-        tooltip: "tabs-to-bookmarks: open tabs are the source of truth — bookmarks are overwritten.\nbookmarks-to-tabs: bookmarks are the source of truth — missing tabs are opened.\nbidirectional: 3-way merge using a local manifest to detect additions and deletions on either side."
-      },
-      {
-        key: "syncInterval", label: "Auto-sync interval (seconds, 0 = manual)", type: "number",
-        tooltip: "How often the automatic sync runs in the background, in seconds. Set to 0 to disable automatic sync and trigger it manually from the toolbar menu."
-      },
-      {
-        key: "syncCloseRemovedTabs", label: "Close tabs deleted on another computer (bidirectional)", type: "checkbox",
-        tooltip: "In bidirectional mode: if a bookmark was present at last sync but is now gone (deleted on another computer), close the corresponding local tab. Disabled by default for safety — essential and pinned tabs are never auto-closed regardless."
-      },
       {
         key: "cleanupEnabled", label: "Enable automatic cleanup", type: "checkbox",
         tooltip: "Runs every hour and automatically closes normal tabs that haven't been accessed for longer than the threshold below. Essential and pinned tabs are protected. Domains in the exclude list are also skipped."

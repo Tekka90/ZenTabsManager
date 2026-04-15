@@ -27,36 +27,14 @@ export const ZenTabsAPI = {
     if (typeof window.ZenTabsManager === "undefined") {
       throw new Error("ZenTabsManager not initialized");
     }
-    const mgr  = window.ZenTabsManager;
-    const prev = mgr.preferences.syncDirection;
-    mgr.preferences.syncDirection = "tabs-to-bookmarks";
-    const result = await mgr.syncManager.performSync({ force: true });
-    mgr.preferences.syncDirection = prev;
-    return result;
+    return window.ZenTabsManager.simpleBookmarkSyncManager.syncTabsToBookmarks();
   },
 
-  async syncFromBookmarks(folderPath) {
+  async syncFromBookmarks(options = {}) {
     if (typeof window.ZenTabsManager === "undefined") {
       throw new Error("ZenTabsManager not initialized");
     }
-    const mgr  = window.ZenTabsManager;
-    const prev = mgr.preferences.syncDirection;
-    mgr.preferences.syncDirection = "bookmarks-to-tabs";
-    const result = await mgr.syncManager.performSync({ force: true });
-    mgr.preferences.syncDirection = prev;
-    return result;
-  },
-
-  async syncBidirectional() {
-    if (typeof window.ZenTabsManager === "undefined") {
-      throw new Error("ZenTabsManager not initialized");
-    }
-    const mgr  = window.ZenTabsManager;
-    const prev = mgr.preferences.syncDirection;
-    mgr.preferences.syncDirection = "bidirectional";
-    const result = await mgr.syncManager.performSync({ force: true });
-    mgr.preferences.syncDirection = prev;
-    return result;
+    return window.ZenTabsManager.simpleBookmarkSyncManager.syncBookmarksToTabs(options);
   },
 
   async cleanupOldTabs(options = {}) {

@@ -1,6 +1,6 @@
 # 🚀 ZenTabs Manager - Full Sine Mod
 
-**Advanced tab management for Zen Browser** with bi-directional bookmark sync, memory optimization, automatic cleanup, and intelligent tab organization.
+**Advanced tab management for Zen Browser** with bookmark sync, memory optimization, automatic cleanup, and intelligent tab organization.
 
 > ⚠️ **IMPORTANT:** This mod requires JavaScript. You MUST enable **"External marketplace"** in Sine settings or the mod won't work! See [Installation Guide](INSTALL.md) for details.
 
@@ -12,14 +12,13 @@
 - **Folder Hierarchy**: Full support for Zen's nested folder system (up to 5 levels)
 - **Tab Classification**: Distinguishes Essential, Pinned, and Normal tabs
 
-### 🔄 Bi-Directional Sync
-- **Tabs → Bookmarks**: Sync your tab structure to bookmarks
-- **Bookmarks → Tabs**: Open bookmarks as tabs automatically
-- **Bidirectional**: Keep tabs and bookmarks in perfect sync
+### 🔄 Bookmark Sync
+- **Tabs → Bookmarks**: Sync your tab structure to bookmarks under `ZenTabs/`
+- **Bookmarks → Tabs**: Restore tabs from bookmarks (with dry-run preview)
 - **Preserves Structure**: Maintains folder hierarchy and organization
 - **Duplicate-safe**: Same URL in multiple folders/spaces syncs correctly (no dedup)
 - **Smart Sync**: Only syncs Essential and Pinned tabs (configurable)
-- **GUID-based manifest**: Tracks individual tab↔bookmark pairings, not just URLs
+- **Space Metadata**: Stores space icons and themes in bookmark annotations
 
 ### 🧹 Automatic Cleanup
 - **Age-Based Cleanup**: Automatically close tabs older than X days
@@ -77,8 +76,8 @@ Copy the repo folder into your Zen profile's `chrome/sine-mods/` directory and r
 Click the **ZenTabs** button in your toolbar to access:
 - List All Tabs
 - Sync to Bookmarks
-- Sync from Bookmarks  
-- Bidirectional Sync
+- Restore from Bookmarks
+- Restore from Bookmarks (dry run)
 - Cleanup Old Tabs
 - Optimize Memory
 - Show Statistics
@@ -105,7 +104,7 @@ const pinnedTabs = await ZenTabsAPI.getTabsFiltered({ type: 'pinned' });
 // Sync operations
 await ZenTabsAPI.syncToBookmarks();
 await ZenTabsAPI.syncFromBookmarks();
-await ZenTabsAPI.syncBidirectional();
+await ZenTabsAPI.syncFromBookmarks({ dryRun: true });
 
 // Cleanup and optimization
 await ZenTabsAPI.cleanupOldTabs({ maxAge: 7, dryRun: false });
@@ -147,10 +146,6 @@ All preferences with defaults:
 | Preference | Default | Description |
 |------------|---------|-------------|
 | `enabled` | `true` | Master switch for all features |
-| `syncEnabled` | `true` | Enable bookmark sync |
-| `syncDirection` | `"bidirectional"` | `"toBookmarks"`, `"fromBookmarks"`, or `"bidirectional"` |
-| `syncInterval` | `300` | Auto-sync interval in seconds |
-| `syncCloseRemovedTabs` | `false` | Close tabs removed from bookmarks during sync |
 | `paused` | `false` | Whether the manager is currently paused |
 | `cleanupEnabled` | `false` | Enable automatic age-based cleanup |
 | `cleanupAge` | `7` | Close tabs older than N (in `cleanupAgeUnit` units) |
@@ -175,7 +170,7 @@ zentabs-manager/
 │   └── zen.api.mjs         # Public API (ZenTabsAPI) exposed on window
 ├── content/
 │   ├── TabManager.mjs      # Tab enumeration, metadata cache, filtering
-│   ├── SyncManager.mjs     # Bi-directional bookmark sync via PlacesUtils
+│   ├── SimpleBookmarkSyncManager.mjs  # Idempotent bookmark sync (tabs↔bookmarks)
 │   ├── CleanupManager.mjs  # Age-based cleanup and memory optimization
 │   └── UI.mjs              # Toolbar button (XUL), dropdown menu, keyboard shortcuts
 ├── README.md               # This file
@@ -190,7 +185,7 @@ The mod is built with a clean separation of concerns:
 
 1. **zen.sys.mjs**: Initializes all managers per chrome window, handles lifecycle
 2. **TabManager**: Core tab operations and metadata extraction
-3. **SyncManager**: GUID-based manifest-driven 3-way bookmark sync (supports duplicate URLs)
+3. **SimpleBookmarkSyncManager**: Idempotent overwrite-based bookmark sync (supports duplicate URLs)
 4. **CleanupManager**: Age-based cleanup, memory optimization, and idle tab unloading
 5. **UIManager**: User interface components
 6. **zen.api.mjs**: Public API (`ZenTabsAPI`) exposed on the chrome window
@@ -201,7 +196,7 @@ Subscribe to events:
 
 ```javascript
 ZenTabsManager.on('initialized', () => console.log('Ready!'));
-ZenTabsManager.on('sync-completed', (result) => console.log(result));
+ZenTabsManager.on('simple-sync-completed', (result) => console.log(result));
 ZenTabsManager.on('cleanup-completed', (result) => console.log(result));
 ZenTabsManager.on('memory-optimized', (result) => console.log(result));
 ```
