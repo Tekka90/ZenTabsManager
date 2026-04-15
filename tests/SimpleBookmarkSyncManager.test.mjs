@@ -311,6 +311,43 @@ describe("getPinnedUrl", () => {
     });
     assert.equal(sm.getPinnedUrl(tab), "https://fallback.example.com");
   });
+
+  test("falls back to __SS_data when currentURI is about:blank (inactive space)", () => {
+    const mgr = makeManager();
+    mgr.window.SessionStore = { getLazyTabValue: () => null };
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const tab = makeTab({
+      url: "about:blank",
+      pinned: true,
+      __SS_data: { entries: [{ url: "https://restored.example.com" }] },
+    });
+    assert.equal(sm.getPinnedUrl(tab), "https://restored.example.com");
+  });
+
+  test("__SS_data with tabData.entries format works", () => {
+    const mgr = makeManager();
+    mgr.window.SessionStore = { getLazyTabValue: () => null };
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const tab = makeTab({
+      url: "about:blank",
+      pinned: true,
+      __SS_data: { tabData: { entries: [{ url: "https://ss-tabdata.example.com" }] } },
+    });
+    assert.equal(sm.getPinnedUrl(tab), "https://ss-tabdata.example.com");
+  });
+
+  test("__SS_data skips about: URLs", () => {
+    const mgr = makeManager();
+    mgr.window.SessionStore = { getLazyTabValue: () => null };
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const tab = makeTab({
+      url: "about:blank",
+      pinned: true,
+      __SS_data: { entries: [{ url: "about:newtab" }] },
+    });
+    // Falls through to currentURI (about:blank)
+    assert.equal(sm.getPinnedUrl(tab), "about:blank");
+  });
 });
 
 // ── getContainerName ──────────────────────────────────────────────────────
@@ -1157,7 +1194,10 @@ describe("syncBookmarksToTabs — live", () => {
     await sm.syncBookmarksToTabs();
     const calls = mgr.window.gZenPinnedTabManager.addToEssentialsCalls;
     assert.ok(calls.length >= 1, "addToEssentials must be called");
-    assert.ok(calls[0].hasAttribute("zen-essential"), "tab must have zen-essential attribute");
+    // addToEssentials sets the attribute — verify the tab now has it
+    assert.ok(calls[0].hasAttribute("zen-essential"), "tab must have zen-essential after addToEssentials");
+    // The tab must also be pinned (addToEssentials pins it)
+    assert.ok(calls[0].pinned, "tab must be pinned after addToEssentials");
   });
 
   test("deletes a live essential tab that has no matching bookmark", async () => {
@@ -1195,6 +1235,36 @@ describe("syncBookmarksToTabs — live", () => {
     const sm = new SimpleBookmarkSyncManager(mgr);
     const result = await sm.syncBookmarksToTabs();
     assert.equal(result.created, 0, "existing essential tab must not be duplicated");
+  });
+
+  test("phantom essentials (attribute set but not pinned) are ignored and recreated properly", async () => {
+    const mgr = makeSyncManagerWithTree();
+    // Simulate a phantom essential from a broken previous restore:
+    // has zen-essential attribute but is NOT pinned (addToEssentials was
+    // skipped because the attribute was set before calling it).
+    const phantomTab = makeTab({
+      url: "https://mail.com",
+      pinned: false,
+      attrs: { "zen-essential": "" },
+    });
+    mgr.window.gBrowser.tabs.push(phantomTab);
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      [phantomTab]
+    );
+    mgr.window.gZenWorkspaces._allStoredTabs = [phantomTab];
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs();
+
+    // The phantom tab should NOT have matched (not pinned), so the essential
+    // should be recreated via addToEssentials AND the phantom deleted.
+    assert.ok(result.created >= 1, "essential should be recreated when phantom exists");
+    assert.ok(result.deleted >= 1, "phantom essential should be deleted");
+
+    // Verify addToEssentials was actually called
+    const calls = mgr.window.gZenPinnedTabManager.addToEssentialsCalls;
+    assert.ok(calls.length >= 1, "addToEssentials must be called for the new essential");
   });
 });
 

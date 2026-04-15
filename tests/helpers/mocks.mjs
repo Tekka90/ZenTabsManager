@@ -401,9 +401,15 @@ export function makeManager({
   const gZenPinnedTabManager = {
     addToEssentialsCalls: [],
     addToEssentials(tab) {
+      // Match Zen's real behavior: skip tabs that already have zen-essential
+      if (tab.hasAttribute("zen-essential")) return false;
       tab.setAttribute("zen-essential", "true");
+      if (tab.hasAttribute("zen-workspace-id")) {
+        tab.removeAttribute("zen-workspace-id");
+      }
       tab.pinned = true;
       this.addToEssentialsCalls.push(tab);
+      return true;
     },
   };
   const ioUtils   = makeIOUtils();

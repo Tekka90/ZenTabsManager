@@ -137,6 +137,23 @@ export class SimpleBookmarkSyncManager {
     if (lazy && !this._isBlankUrl(lazy)) return lazy;
 
     const live = tab.linkedBrowser?.currentURI?.spec;
+    if (live && !this._isBlankUrl(live)) return live;
+
+    // Lazy/inactive tabs: Zen's ZenSessionManager stores the URL in
+    // __SS_data on the browser element when a tab is unloaded or in an
+    // inactive space.
+    try {
+      const ssData = tab.linkedBrowser?.__SS_data;
+      if (ssData) {
+        const entries = ssData.tabData?.entries ?? ssData.entries ?? [];
+        const last = entries[entries.length - 1];
+        if (last?.url && !this._isBlankUrl(last.url) &&
+            !last.url.startsWith("chrome:")) {
+          return last.url;
+        }
+      }
+    } catch (_) { /* non-fatal */ }
+
     return live ?? null;
   }
 
@@ -843,7 +860,10 @@ export class SimpleBookmarkSyncManager {
 
       // 5. Collect live Essential and Pinned tabs.
       const allLiveTabs = win.gZenWorkspaces?.allStoredTabs ?? win.gBrowser.tabs;
-      const liveEssentials = allLiveTabs.filter(t => t.hasAttribute("zen-essential"));
+      // Essential tabs must be pinned — exclude phantom tabs from previous
+      // broken restores that have the attribute but were never properly
+      // registered with Zen (not pinned, not in essentials section).
+      const liveEssentials = allLiveTabs.filter(t => t.hasAttribute("zen-essential") && t.pinned);
       const livePinnedBySpace = new Map();
       for (const ws of spaceMap.values()) {
         livePinnedBySpace.set(
@@ -870,6 +890,7 @@ export class SimpleBookmarkSyncManager {
       await this._reconcileEssentialTabs(
         desiredEssentials,
         liveEssentials,
+        allLiveTabs,
         dryRecord,
         result
       );
@@ -1086,9 +1107,27 @@ export class SimpleBookmarkSyncManager {
    * Creates missing ones, deletes stale ones.  Essential tabs are matched by
    * (url, containerTabId) pairs.
    */
-  async _reconcileEssentialTabs(desired, liveEssentials, dryRecord, result) {
+  async _reconcileEssentialTabs(desired, liveEssentials, allLiveTabs, dryRecord, result) {
     const win     = this.manager.window;
     const gBrowser = win.gBrowser;
+
+    // Clean up phantom essentials: tabs that have zen-essential attribute but
+    // are NOT pinned.  These are leftovers from a broken previous restore where
+    // addToEssentials was skipped.  They are invisible in the UI but prevent
+    // correct matching.
+    const phantomEssentials = Array.from(allLiveTabs).filter(
+      t => t.hasAttribute("zen-essential") && !t.pinned
+    );
+    for (const phantom of phantomEssentials) {
+      const url = this.getEssentialUrl(phantom) ?? "(unknown)";
+      const desc = `Delete phantom essential tab "${url}" (has attribute but not pinned)`;
+      if (dryRecord("deleted", "delete-tab", desc, { url })) {
+        try {
+          gBrowser.removeTab(phantom, { skipPermitUnload: true });
+          result.deleted++;
+        } catch (_) { /* non-fatal */ }
+      }
+    }
 
     // Resolve containerTabId for each desired entry.
     const resolved = [];
@@ -1126,10 +1165,14 @@ export class SimpleBookmarkSyncManager {
               triggeringPrincipal:
                 win.Services?.scriptSecurityManager?.getSystemPrincipal?.(),
             });
-            tab.setAttribute("zen-essential", "true");
+            // IMPORTANT: Do NOT set zen-essential before addToEssentials.
+            // Zen's addToEssentials() skips tabs that already have the attribute,
+            // so it would never pin the tab or move it to the essentials section.
             if (win.gZenPinnedTabManager?.addToEssentials) {
               win.gZenPinnedTabManager.addToEssentials(tab);
-            } else if (!tab.pinned) {
+            } else {
+              // Fallback: manual approach (same as SyncManager)
+              tab.setAttribute("zen-essential", "true");
               gBrowser.pinTab(tab);
             }
             result.created++;
