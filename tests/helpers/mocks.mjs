@@ -220,6 +220,8 @@ export function makeGZenWorkspaces(workspaces = [], allTabs = []) {
   let _activeUuid = workspaces[0]?.uuid ?? null;
   let _switchCount = 0;
   let _allStoredTabs = allTabs;
+  // Simulated pinned-tabs containers per workspace (for reorder tests).
+  const _pinnedContainers = new Map();
   const obj = {
     getWorkspaces: ()           => workspaces,
     getWorkspaceFromId: (uuid)  => byUuid.get(uuid) ?? null,
@@ -252,6 +254,24 @@ export function makeGZenWorkspaces(workspaces = [], allTabs = []) {
     moveTabToWorkspace(tab, uuid) {
       tab.setAttribute("zen-workspace-id", uuid);
     },
+    // Returns a mock workspace element with a pinnedTabsContainer.
+    workspaceElement(uuid) {
+      if (!_pinnedContainers.has(uuid)) {
+        const _children = [];
+        _pinnedContainers.set(uuid, {
+          pinnedTabsContainer: {
+            appendChild(item) {
+              const idx = _children.indexOf(item);
+              if (idx !== -1) _children.splice(idx, 1);
+              _children.push(item);
+            },
+            _children,
+          },
+        });
+      }
+      return _pinnedContainers.get(uuid);
+    },
+    _pinnedContainers,
   };
   return obj;
 }
@@ -302,6 +322,12 @@ export function makeGZenFolders() {
       const groupContainer = {
         get lastElementChild() {
           return containerChildren[containerChildren.length - 1] || null;
+        },
+        // DOM-like appendChild: moves item to end (reorder support).
+        appendChild(item) {
+          const idx = containerChildren.indexOf(item);
+          if (idx !== -1) containerChildren.splice(idx, 1);
+          containerChildren.push(item);
         },
         _children: containerChildren,
       };

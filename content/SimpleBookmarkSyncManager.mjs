@@ -1242,6 +1242,9 @@ export class SimpleBookmarkSyncManager {
       };
     });
 
+    // Folder references collected during reconciliation for ordering.
+    const folderRefs = new Map(); // folderPath → folderRef
+
     // Process pinned items in bookmark order (preserving interleaved
     // bookmarks and folders so tabs/folders appear in the correct order).
     for (const item of sf.pinned) {
@@ -1279,9 +1282,10 @@ export class SimpleBookmarkSyncManager {
           }
         }
       } else if (item.type === "folder") {
-        await this._reconcileFolderRecursive(
-          item, null, item.title, sf, ws, livePool, dryRecord, result
+        const ref = await this._reconcileFolderRecursive(
+          item, null, item.title, sf, ws, livePool, dryRecord, result, folderRefs
         );
+        if (ref) folderRefs.set(item.title, ref);
       }
     }
 
@@ -1300,101 +1304,168 @@ export class SimpleBookmarkSyncManager {
       }
     }
 
-    // ── Enforce bookmark order on surviving pinned tabs ──────────────
-    this._enforceTabOrder(sf, ws, dryRecord, result);
+    // ── Enforce bookmark order on surviving pinned tabs at ALL levels ──
+    this._enforceTabOrder(sf, ws, folderRefs, dryRecord, result);
   }
 
   /**
-   * Reorder surviving pinned tabs in a space to match bookmark order.
+   * Enforce bookmark order on surviving pinned tabs and folders at ALL levels.
    *
-   * Flattens the bookmark tree (sf.pinned) into a DFS-ordered list of
-   * {url, folderPath} entries, pool-matches them to live tabs, and uses
-   * gBrowser.moveTabTo to fix any ordering mismatches.
+   * Walks the bookmark tree recursively.  At each level (root of space,
+   * inside each folder) it builds the desired item order from the bookmark
+   * children and reorders live elements to match.
+   *
+   * - Within a folder: uses `groupContainer.appendChild(item)` which moves
+   *   existing DOM children to the end, effectively sorting them.
+   * - Root level: uses `gBrowser.moveTabTo` for tabs (safe for root items)
+   *   and `pinnedTabsContainer.appendChild` for folders when available.
    */
-  _enforceTabOrder(sf, ws, dryRecord, result) {
+  _enforceTabOrder(sf, ws, folderRefs, dryRecord, result) {
+    this._reorderLevel(sf.pinned, null, null, sf.name, ws, folderRefs, dryRecord, result);
+  }
+
+  /**
+   * Reorder items at a single container level (root or within-folder),
+   * then recurse into sub-folders.
+   *
+   * @param {Array}  items      — bookmark entries at this level
+   * @param {object} folderRef  — Zen folder element (null for root level)
+   * @param {string} folderPath — slash-separated folder path (null for root)
+   * @param {string} spaceName  — space name (for logging)
+   * @param {object} ws         — workspace object
+   * @param {Map}    folderRefs — folderPath → folderRef map
+   * @param {Function} dryRecord
+   * @param {object} result
+   */
+  _reorderLevel(items, folderRef, folderPath, spaceName, ws, folderRefs, dryRecord, result) {
     const win            = this.manager.window;
     const gBrowser       = win.gBrowser;
     const gZenWorkspaces = win.gZenWorkspaces;
+    const allTabs        = gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
 
-    // Build desired flat URL order from bookmark tree (DFS).
-    const desiredOrder = [];
-    const flatten = (item, folderPath) => {
-      if (item.type === "bookmark") {
-        if (item.url && !this._isBlankUrl(item.url)) {
-          desiredOrder.push({ url: item.url, folderPath });
+    // Build desired order by pool-matching bookmark items to live items.
+    const consumedTabs    = new Set();
+    const consumedFolders = new Set();
+    const orderedRefs     = [];
+
+    for (const item of items) {
+      if (item.type === "bookmark" && item.url && !this._isBlankUrl(item.url)) {
+        const tab = Array.from(allTabs).find(t => {
+          if (consumedTabs.has(t)) return false;
+          if (!t.pinned || t.hasAttribute("zen-essential")) return false;
+          if (t.getAttribute("zen-workspace-id") !== ws.uuid) return false;
+          if ((this.getPinnedUrl(t) ?? "") !== item.url) return false;
+          const tp = this._getTabFolderPath(t);
+          const tabPath = tp ? tp.join("/") : null;
+          return tabPath === folderPath;
+        });
+        if (tab) {
+          consumedTabs.add(tab);
+          orderedRefs.push(tab);
         }
       } else if (item.type === "folder") {
-        const childPath = folderPath ? folderPath + "/" + item.title : item.title;
-        for (const child of item.children ?? []) {
-          flatten(child, childPath);
+        const childPath = folderPath
+          ? folderPath + "/" + item.title
+          : item.title;
+
+        const subRef = folderRefs.get(childPath);
+        if (subRef && !consumedFolders.has(subRef)) {
+          consumedFolders.add(subRef);
+          orderedRefs.push(subRef);
         }
-      }
-    };
-    for (const item of sf.pinned) {
-      flatten(item, null);
-    }
 
-    if (desiredOrder.length <= 1) return;
-
-    // Collect surviving pinned tabs in this space, sorted by current _tPos.
-    const allTabs   = gZenWorkspaces?.allStoredTabs ?? gBrowser.tabs;
-    const spaceTabs = Array.from(allTabs).filter(
-      t => t.pinned &&
-           !t.hasAttribute("zen-essential") &&
-           t.getAttribute("zen-workspace-id") === ws.uuid
-    ).sort((a, b) => (a._tPos ?? 0) - (b._tPos ?? 0));
-
-    if (spaceTabs.length <= 1) return;
-
-    // Pool-match desired order → surviving tabs.
-    const tabPool = spaceTabs.map(t => ({
-      tab:        t,
-      url:        this.getPinnedUrl(t) ?? "",
-      folderPath: (() => {
-        const fp = this._getTabFolderPath(t);
-        return fp ? fp.join("/") : null;
-      })(),
-      consumed: false,
-    }));
-
-    const orderedTabs = [];
-    for (const desired of desiredOrder) {
-      const idx = tabPool.findIndex(
-        tp => !tp.consumed && tp.url === desired.url && tp.folderPath === desired.folderPath
-      );
-      if (idx !== -1) {
-        tabPool[idx].consumed = true;
-        orderedTabs.push(tabPool[idx].tab);
-      }
-    }
-
-    if (orderedTabs.length <= 1) return;
-
-    // Check if already in correct order.
-    let alreadyCorrect = orderedTabs.length === spaceTabs.length;
-    if (alreadyCorrect) {
-      for (let i = 0; i < orderedTabs.length; i++) {
-        if (spaceTabs[i] !== orderedTabs[i]) {
-          alreadyCorrect = false;
-          break;
+        // Recurse into sub-folder children.
+        if (subRef) {
+          this._reorderLevel(
+            item.children ?? [], subRef, childPath, spaceName, ws, folderRefs, dryRecord, result
+          );
         }
       }
     }
-    if (alreadyCorrect) return;
 
-    const desc = `Reorder ${orderedTabs.length} pinned tab(s) in space "${sf.name}" to match bookmark order`;
-    if (dryRecord("updated", "reorder-tabs", desc, { space: sf.name, count: orderedTabs.length })) {
-      const startPos = Math.min(...spaceTabs.map(t => t._tPos ?? 0));
-      for (let i = 0; i < orderedTabs.length; i++) {
-        try {
-          gBrowser.moveTabTo(orderedTabs[i], { tabIndex: startPos + i });
-        } catch (e) {
-          result.errors.push(`reorder tab in "${sf.name}": ${e.message}`);
+    if (orderedRefs.length <= 1) return;
+
+    // Determine whether items are already in the correct order.
+    if (folderRef && folderRef.groupContainer) {
+      // ── Within-folder: compare order in groupContainer ──────────
+      const container = folderRef.groupContainer;
+      // Filter real items (skip structural elements like zen-tab-group-start).
+      const currentItems = container._children
+        ? container._children.filter(c => !c._emptyTab)
+        : Array.from(container.children ?? []).filter(c =>
+            !c.classList?.contains("zen-tab-group-start") &&
+            !c.classList?.contains("pinned-tabs-container-separator")
+          );
+
+      let alreadyCorrect = this._isOrderCorrect(currentItems, orderedRefs);
+      if (alreadyCorrect) return;
+
+      const desc = `Reorder ${orderedRefs.length} item(s) in folder "${folderRef.label}" in space "${spaceName}"`;
+      if (dryRecord("updated", "reorder-tabs", desc,
+        { folder: folderRef.label, space: spaceName, count: orderedRefs.length })) {
+        for (const ref of orderedRefs) {
+          container.appendChild(ref);
+        }
+        result.updated++;
+        this.log(`Reordered ${orderedRefs.length} items in folder "${folderRef.label}"`);
+      }
+    } else {
+      // ── Root level ──────────────────────────────────────────────
+      // Separate tabs from folders — tabs use moveTabTo, folders use
+      // pinnedTabsContainer DOM if available.
+      const rootTabs    = orderedRefs.filter(r => !r.isZenFolder);
+      const rootFolders = orderedRefs.filter(r => r.isZenFolder);
+
+      // Reorder root-level tabs.
+      if (rootTabs.length > 1) {
+        const sortedByPos = [...rootTabs].sort((a, b) => (a._tPos ?? 0) - (b._tPos ?? 0));
+        if (!this._isOrderCorrect(sortedByPos, rootTabs)) {
+          const desc = `Reorder ${rootTabs.length} root pinned tab(s) in space "${spaceName}"`;
+          if (dryRecord("updated", "reorder-tabs", desc, { space: spaceName, count: rootTabs.length })) {
+            const startPos = Math.min(...sortedByPos.map(t => t._tPos ?? 0));
+            for (let i = 0; i < rootTabs.length; i++) {
+              try {
+                gBrowser.moveTabTo(rootTabs[i], { tabIndex: startPos + i });
+              } catch (e) {
+                result.errors.push(`reorder root tab in "${spaceName}": ${e.message}`);
+              }
+            }
+            result.updated++;
+            this.log(`Reordered ${rootTabs.length} root tabs in space "${spaceName}"`);
+          }
         }
       }
-      result.updated++;
-      this.log(`Reordered ${orderedTabs.length} tabs in space "${sf.name}"`);
+
+      // Reorder root-level folders using pinnedTabsContainer if available.
+      if (rootFolders.length > 1) {
+        const pinnedContainer = gZenWorkspaces?.workspaceElement?.(ws.uuid)?.pinnedTabsContainer;
+        if (pinnedContainer?.appendChild) {
+          const desc = `Reorder ${rootFolders.length} root folder(s) in space "${spaceName}"`;
+          if (dryRecord("updated", "reorder-folders", desc,
+            { space: spaceName, count: rootFolders.length })) {
+            for (const folder of rootFolders) {
+              pinnedContainer.appendChild(folder);
+            }
+            result.updated++;
+            this.log(`Reordered ${rootFolders.length} root folders in space "${spaceName}"`);
+          }
+        }
+      }
     }
+  }
+
+  /**
+   * Check whether `currentItems` contains `desiredItems` in the same
+   * relative order (ignoring extra items between them).
+   */
+  _isOrderCorrect(currentItems, desiredItems) {
+    let pos = 0;
+    for (const item of currentItems) {
+      if (pos < desiredItems.length && item === desiredItems[pos]) {
+        pos++;
+      }
+    }
+    return pos === desiredItems.length;
   }
 
   /**
@@ -1404,7 +1475,7 @@ export class SimpleBookmarkSyncManager {
    * inside it, then recurses into any sub-folder children — nesting them
    * inside the parent via `insertAfter` on the parent's groupContainer.
    */
-  async _reconcileFolderRecursive(folderEntry, parentFolder, folderPath, sf, ws, livePool, dryRecord, result) {
+  async _reconcileFolderRecursive(folderEntry, parentFolder, folderPath, sf, ws, livePool, dryRecord, result, folderRefs) {
     const win          = this.manager.window;
     const gBrowser     = win.gBrowser;
     const gZenWorkspaces = win.gZenWorkspaces;
@@ -1558,10 +1629,13 @@ export class SimpleBookmarkSyncManager {
     // Recursively handle sub-folders, nesting them inside this folder.
     for (const subFolder of subFolders) {
       const subPath = folderPath + "/" + subFolder.title;
-      await this._reconcileFolderRecursive(
-        subFolder, folderRef, subPath, sf, ws, livePool, dryRecord, result
+      const subRef = await this._reconcileFolderRecursive(
+        subFolder, folderRef, subPath, sf, ws, livePool, dryRecord, result, folderRefs
       );
+      if (subRef) folderRefs.set(subPath, subRef);
     }
+
+    return folderRef;
   }
 
   /**
