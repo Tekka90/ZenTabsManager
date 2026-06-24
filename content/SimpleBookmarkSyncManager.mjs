@@ -985,7 +985,10 @@ export class SimpleBookmarkSyncManager {
       }
 
       // 5. Collect live Essential and Pinned tabs.
-      const allLiveTabs = win.gZenWorkspaces?.allStoredTabs ?? win.gBrowser.tabs;
+      const allLiveTabsRaw = win.gZenWorkspaces?.allStoredTabs ?? win.gBrowser.tabs;
+      const allLiveTabs = Array.from(allLiveTabsRaw).filter(
+        t => !t.hasAttribute("zen-empty-tab")
+      );
       // Essential tabs must be pinned — exclude phantom tabs from previous
       // broken restores that have the attribute but were never properly
       // registered with Zen (not pinned, not in essentials section).
@@ -1353,10 +1356,12 @@ export class SimpleBookmarkSyncManager {
     // "1M Panels" (root) from "Project/1M Panels" (nested).
     const livePool = livePinned.map(t => {
       const folderPath = this._getTabFolderPath(t);
+      const url = this.getPinnedUrl(t) ?? "";
       return {
         tab:         t,
-        url:         this.getPinnedUrl(t) ?? "",
+        url,
         folderPath:  folderPath ? folderPath.join("/") : null,
+        transient:   this._isBlankUrl(url),
         matched:     false,
       };
     });
@@ -1411,6 +1416,11 @@ export class SimpleBookmarkSyncManager {
     // ── Delete unmatched live pinned tabs in this space ────────────────
     for (const lp of livePool) {
       if (lp.matched) continue;
+      if (lp.transient) {
+        // Ignore transient placeholder tabs (about:blank/newtab) during restore.
+        // They commonly appear in inactive spaces and should not drive deletes.
+        continue;
+      }
       this.log(`Unmatched live tab: url="${lp.url}" folderPath="${lp.folderPath}" space="${sf.name}"`);
       const desc = `Delete pinned tab "${lp.url}" from space "${sf.name}"`;
       if (dryRecord("deleted", "delete-tab", desc, { url: lp.url, space: sf.name })) {
@@ -1424,7 +1434,10 @@ export class SimpleBookmarkSyncManager {
     }
 
     // ── Enforce bookmark order on surviving pinned tabs at ALL levels ──
-    this._enforceTabOrder(sf, ws, folderRefs, dryRecord, result);
+    const hasTransientUnmatched = livePool.some(lp => !lp.matched && lp.transient);
+    if (!hasTransientUnmatched) {
+      this._enforceTabOrder(sf, ws, folderRefs, dryRecord, result);
+    }
   }
 
   /**

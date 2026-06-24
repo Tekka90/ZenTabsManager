@@ -1247,6 +1247,28 @@ describe("syncBookmarksToTabs — dry-run", () => {
     assert.equal(result.created, 0);
     assert.equal(result.plan?.length, 0);
   });
+
+  test("ignores transient about:blank pinned tabs during delete planning", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const realPinned = makePinnedTab("https://gh.com", 0, ws.uuid, { label: "GitHub" });
+    const transient = makeTab({
+      url: "about:blank",
+      pinned: true,
+      attrs: { "zen-workspace-id": ws.uuid, "zen-empty-tab": "" },
+    });
+
+    const mgr = makeManager({ workspaces: [ws], tabs: [realPinned, transient] });
+    const sm = new SimpleBookmarkSyncManager(mgr);
+
+    // Seed bookmarks from live tabs. zen-empty-tab should never be written.
+    await sm.syncTabsToBookmarks();
+
+    const result = await sm.syncBookmarksToTabs({ dryRun: true });
+    const deleteActions = (result.plan ?? []).filter(p => p.action === "delete-tab");
+
+    assert.equal(result.deleted, 0, "transient blank tabs should not be planned for deletion");
+    assert.equal(deleteActions.length, 0, "dry-run should not include delete-tab for transient blanks");
+  });
 });
 
 // ── syncBookmarksToTabs — live (tab creation) ─────────────────────────────
