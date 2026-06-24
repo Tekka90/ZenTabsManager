@@ -1546,6 +1546,68 @@ describe("syncBookmarksToTabs — live", () => {
     assert.equal(result.created, 1, "created counter should reflect planned create");
   });
 
+  test("dry-run does not satisfy Work duplicate from same URL in default/null container", async () => {
+    const mgr = makeSyncManagerWithTree();
+
+    // Work essentials contain duplicated myapps URL.
+    mgr.window.PlacesUtils.bookmarks._store.set("bm-mail", {
+      guid: "bm-mail",
+      parentGuid: "ess-work",
+      type: "bookmark",
+      title: "My Apps",
+      url: "https://myapps.microsoft.com/",
+    });
+    mgr.window.PlacesUtils.bookmarks._store.set("bm-mail-2", {
+      guid: "bm-mail-2",
+      parentGuid: "ess-work",
+      type: "bookmark",
+      title: "My Apps 2",
+      url: "https://myapps.microsoft.com/",
+    });
+
+    // Live has two myapps essentials, but only one in Work container (2).
+    // The other is legacy/default (no usercontextid).
+    const workMyApps = makeTab({
+      url: "https://myapps.microsoft.com/",
+      pinned: true,
+      attrs: { "zen-essential": "", "usercontextid": "2", "zen-workspace-id": "uuid-work" },
+    });
+    const nullContainerMyApps = makeTab({
+      url: "https://myapps.microsoft.com/",
+      pinned: true,
+      attrs: { "zen-essential": "" },
+    });
+
+    mgr.window.gBrowser.tabs.push(workMyApps, nullContainerMyApps);
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      [workMyApps, nullContainerMyApps]
+    );
+    mgr.window.gZenWorkspaces._allStoredTabs = [workMyApps, nullContainerMyApps];
+
+    // Resolve "Essentials - Work" -> userContextId 2.
+    mgr.window.ContextualIdentityService = {
+      getPublicIdentities: () => [{ userContextId: 2, name: "Work" }],
+      create: () => ({ userContextId: 2 }),
+    };
+
+    // Force container-labeled folder for desired entries.
+    mgr.window.PlacesUtils.bookmarks._store.set("ess-work", {
+      guid: "ess-work",
+      parentGuid: "ws-work",
+      type: "folder",
+      title: "Essentials - Work",
+      url: null,
+    });
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs({ dryRun: true });
+    const createActions = (result.plan ?? []).filter(p => p.action === "create-tab");
+
+    assert.equal(createActions.length, 1, "should plan one create for missing Work duplicate");
+    assert.equal(result.created, 1);
+  });
+
   test("phantom essentials (attribute set but not pinned) are ignored and recreated properly", async () => {
     const mgr = makeSyncManagerWithTree();
     // Simulate a phantom essential from a broken previous restore:

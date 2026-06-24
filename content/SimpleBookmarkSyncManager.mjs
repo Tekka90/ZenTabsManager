@@ -1321,22 +1321,41 @@ export class SimpleBookmarkSyncManager {
     );
 
     // Build a consumable pool of live essentials.
-    const livePool = liveEssentials.map(t => ({
-      tab:           t,
-      url:           this.getEssentialUrl(t) ?? "",
-      normalizedUrl: this._normalizeComparableUrl(this.getEssentialUrl(t) ?? ""),
-      containerTabId: parseInt(t.getAttribute("usercontextid") ?? "0", 10),
-      matched:       false,
-    }));
+    const livePool = liveEssentials.map(t => {
+      const rawContainer = t.getAttribute("usercontextid");
+      const parsed = parseInt(rawContainer ?? "", 10);
+      const containerTabId = Number.isFinite(parsed) ? parsed : 0;
+      return {
+        tab:            t,
+        url:            this.getEssentialUrl(t) ?? "",
+        normalizedUrl:  this._normalizeComparableUrl(this.getEssentialUrl(t) ?? ""),
+        containerTabId,
+        hasContainerId: rawContainer != null,
+        matched:        false,
+      };
+    });
 
-    // Match desired → live by URL only.  Essential tabs in Zen are global
-    // (shared across all spaces) and may not carry a containerTabId matching
-    // the one resolved from the bookmark folder name.
+    // Match desired → live preferring exact (url + container).
+    // Fallback to URL-only is limited to default-container desired entries
+    // and only for live tabs that also look like default-container tabs.
     for (const d of resolved) {
       const desiredNormalizedUrl = this._normalizeComparableUrl(d.url);
-      const idx = livePool.findIndex(
-        lp => !lp.matched && lp.normalizedUrl === desiredNormalizedUrl
+      let idx = livePool.findIndex(
+        lp =>
+          !lp.matched &&
+          lp.normalizedUrl === desiredNormalizedUrl &&
+          lp.containerTabId === d.containerTabId
       );
+
+      if (idx === -1 && d.containerTabId === 0) {
+        idx = livePool.findIndex(
+          lp =>
+            !lp.matched &&
+            lp.normalizedUrl === desiredNormalizedUrl &&
+            (lp.containerTabId === 0 || !lp.hasContainerId)
+        );
+      }
+
       if (idx !== -1) {
         livePool[idx].matched = true;
       } else {
