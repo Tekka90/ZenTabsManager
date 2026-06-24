@@ -117,6 +117,20 @@ describe("buildDesiredTree — essential tabs only", () => {
     // No valid essentials → no Essentials folder → no space folder.
     assert.equal(tree.children.length, 0);
   });
+
+  test("deduplicates duplicate essential URLs in the same space", async () => {
+    const ws = makeWorkspace("Personal");
+    const tab1 = makeEssentialTab("https://mail.example.com", 0, ws.uuid, { label: "Mail" });
+    const tab2 = makeEssentialTab("https://mail.example.com", 1, ws.uuid, { label: "Mail (dup)" });
+    const sm = makeSyncManager([ws], [tab1, tab2]);
+    const tree = await sm.buildDesiredTree();
+
+    const spaceFolder = tree.children[0];
+    const essFolder = spaceFolder.children.find(c => c.type === "folder" && c.title.startsWith("Essentials"));
+    assert.ok(essFolder, "Essentials folder should exist");
+    assert.equal(essFolder.children.length, 1, "duplicate essential URLs should be emitted once");
+    assert.equal(essFolder.children[0].url, "https://mail.example.com");
+  });
 });
 
 describe("buildDesiredTree — pinned tabs no folder", () => {
@@ -1295,6 +1309,21 @@ describe("syncBookmarksToTabs — dry-run", () => {
     assert.equal(result.deleted, 0, "transient blank tabs should not be planned for deletion");
     assert.equal(deleteActions.length, 0, "dry-run should not include delete-tab for transient blanks");
   });
+
+  test("does not plan deletion when duplicate live essentials share a desired URL", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const e1 = makeEssentialTab("https://myapps.microsoft.com/", 0, ws.uuid, { label: "MyApps", pinned: true });
+    const e2 = makeEssentialTab("https://myapps.microsoft.com/", 1, ws.uuid, { label: "MyApps Dup", pinned: true });
+
+    const mgr = makeManager({ workspaces: [ws], tabs: [e1, e2] });
+    const sm = new SimpleBookmarkSyncManager(mgr);
+
+    await sm.syncTabsToBookmarks();
+    const result = await sm.syncBookmarksToTabs({ dryRun: true });
+    const deleteActions = (result.plan ?? []).filter(p => p.action === "delete-tab");
+
+    assert.equal(deleteActions.length, 0, "duplicate essentials with desired URL should not be deleted");
+  });
 });
 
 // ── syncBookmarksToTabs — live (tab creation) ─────────────────────────────
@@ -1343,13 +1372,17 @@ describe("syncBookmarksToTabs — live", () => {
       "zentabs-pending-url must be set");
   });
 
-  test("deletes a live essential tab that has no matching bookmark", async () => {
+  test("deletes a managed live essential tab that has no matching bookmark", async () => {
     const mgr = makeSyncManagerWithTree();
     // Add a stale essential tab not in bookmarks
     const staleTab = makeTab({
       url: "https://stale.com",
       pinned: true,
-      attrs: { "zen-essential": "", "zen-workspace-id": "uuid-work" },
+      attrs: {
+        "zen-essential": "",
+        "zen-workspace-id": "uuid-work",
+        "zentabs-pending-url": "https://stale.com",
+      },
     });
     mgr.window.gBrowser.tabs.push(staleTab);
     mgr.window.gZenWorkspaces = makeGZenWorkspaces(
@@ -1361,6 +1394,28 @@ describe("syncBookmarksToTabs — live", () => {
     const sm = new SimpleBookmarkSyncManager(mgr);
     const result = await sm.syncBookmarksToTabs();
     assert.equal(result.deleted, 1);
+  });
+
+  test("does not delete unmanaged live essential tab that has no matching bookmark", async () => {
+    const mgr = makeSyncManagerWithTree();
+    const userEssential = makeTab({
+      url: "https://user-essential.com",
+      pinned: true,
+      attrs: { "zen-essential": "", "zen-workspace-id": "uuid-work" },
+    });
+
+    mgr.window.gBrowser.tabs.push(userEssential);
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      [userEssential]
+    );
+    mgr.window.gZenWorkspaces._allStoredTabs = [userEssential];
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs();
+
+    assert.equal(result.errors.length, 0);
+    assert.equal(result.deleted, 0, "unmanaged essential should be preserved");
   });
 
   test("does not re-create an essential tab that already exists", async () => {

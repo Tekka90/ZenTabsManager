@@ -274,9 +274,13 @@ export class SimpleBookmarkSyncManager {
 
     // ── Essentials folder ────────────────────────────────────────────────
     const essentialsBookmarks = [];
+    const seenEssentialUrls = new Set();
     for (const tab of essentialTabs) {
       const url = this.getEssentialUrl(tab);
       if (!url || this._isBlankUrl(url)) continue;
+      const normalizedUrl = this._normalizeComparableUrl(url);
+      if (seenEssentialUrls.has(normalizedUrl)) continue;
+      seenEssentialUrls.add(normalizedUrl);
       essentialsBookmarks.push({
         type: "bookmark",
         title: this._getTabTitle(tab, url),
@@ -675,6 +679,15 @@ export class SimpleBookmarkSyncManager {
       "",
     ]);
     return blank.has(url);
+  }
+
+  _normalizeComparableUrl(url) {
+    if (!url) return "";
+    try {
+      return new URL(url).href;
+    } catch (_) {
+      return String(url);
+    }
   }
 
   log(...args) {
@@ -1285,11 +1298,15 @@ export class SimpleBookmarkSyncManager {
       const containerTabId = await this._resolveContainerName(d.containerName);
       resolved.push({ ...d, containerTabId });
     }
+    const desiredUrlSet = new Set(
+      resolved.map(d => this._normalizeComparableUrl(d.url))
+    );
 
     // Build a consumable pool of live essentials.
     const livePool = liveEssentials.map(t => ({
       tab:           t,
       url:           this.getEssentialUrl(t) ?? "",
+      normalizedUrl: this._normalizeComparableUrl(this.getEssentialUrl(t) ?? ""),
       containerTabId: parseInt(t.getAttribute("usercontextid") ?? "0", 10),
       matched:       false,
     }));
@@ -1298,8 +1315,9 @@ export class SimpleBookmarkSyncManager {
     // (shared across all spaces) and may not carry a containerTabId matching
     // the one resolved from the bookmark folder name.
     for (const d of resolved) {
+      const desiredNormalizedUrl = this._normalizeComparableUrl(d.url);
       const idx = livePool.findIndex(
-        lp => !lp.matched && lp.url === d.url
+        lp => !lp.matched && lp.normalizedUrl === desiredNormalizedUrl
       );
       if (idx !== -1) {
         livePool[idx].matched = true;
@@ -1336,6 +1354,18 @@ export class SimpleBookmarkSyncManager {
     // Delete unmatched live essentials.
     for (const lp of livePool) {
       if (lp.matched) continue;
+
+      // Safety: if this URL exists in desired essentials, don't delete it just
+      // because multiple live tabs share the same URL. Matching order for
+      // essentials can vary across spaces/containers and should not remove the
+      // user's visible essential tab.
+      if (desiredUrlSet.has(lp.normalizedUrl)) continue;
+
+      // Safety: only delete essentials that were created by ZenTabs restore.
+      // User-managed essentials (without this marker) are preserved.
+      const isManagedByZenTabs = !!lp.tab.getAttribute("zentabs-pending-url");
+      if (!isManagedByZenTabs) continue;
+
       const desc = `Delete essential tab "${lp.url}" [container: ${lp.containerTabId}]`;
       if (dryRecord("deleted", "delete-tab", desc, { url: lp.url })) {
         try {
