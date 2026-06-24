@@ -974,13 +974,13 @@ describe("_buildDesiredEssentials", () => {
     assert.equal(result[0].containerName, "Essentials");
   });
 
-  test("deduplicates identical url+containerName across two spaces", () => {
+  test("keeps identical url+containerName entries across two spaces", () => {
     const entry = { url: "https://a.com", title: "A" };
     const result = sm._buildDesiredEssentials([
       { name: "Work",     essentials: [{ containerName: "Essentials", items: [entry] }], pinned: [] },
       { name: "Personal", essentials: [{ containerName: "Essentials", items: [entry] }], pinned: [] },
     ]);
-    assert.equal(result.length, 1, "duplicate across spaces must be collapsed");
+    assert.equal(result.length, 2, "duplicate across spaces should preserve multiplicity");
   });
 
   test("preserves duplicate entries within the same space", () => {
@@ -1488,6 +1488,64 @@ describe("syncBookmarksToTabs — live", () => {
     assert.equal(mailTabs.length, 2, "should have two essential tabs for duplicate bookmarks");
   });
 
+  test("dry-run plans creating one essential when bookmarks have 4 and live has 3", async () => {
+    const mgr = makeSyncManagerWithTree();
+
+    // Add one duplicate plus two extra unique essentials => 4 bookmarks total.
+    mgr.window.PlacesUtils.bookmarks._store.set("bm-mail-2", {
+      guid: "bm-mail-2",
+      parentGuid: "ess-work",
+      type: "bookmark",
+      title: "Mail Duplicate",
+      url: "https://mail.com",
+    });
+    mgr.window.PlacesUtils.bookmarks._store.set("bm-apps", {
+      guid: "bm-apps",
+      parentGuid: "ess-work",
+      type: "bookmark",
+      title: "Apps",
+      url: "https://myapps.microsoft.com/",
+    });
+    mgr.window.PlacesUtils.bookmarks._store.set("bm-docs", {
+      guid: "bm-docs",
+      parentGuid: "ess-work",
+      type: "bookmark",
+      title: "Docs",
+      url: "https://docs.example.com/",
+    });
+
+    // Live essentials: 3 tabs (mail, apps, docs).
+    const liveMail = makeTab({
+      url: "https://mail.com",
+      pinned: true,
+      attrs: { "zen-essential": "", "usercontextid": "0" },
+    });
+    const liveApps = makeTab({
+      url: "https://myapps.microsoft.com/",
+      pinned: true,
+      attrs: { "zen-essential": "", "usercontextid": "0" },
+    });
+    const liveDocs = makeTab({
+      url: "https://docs.example.com/",
+      pinned: true,
+      attrs: { "zen-essential": "", "usercontextid": "0" },
+    });
+
+    mgr.window.gBrowser.tabs.push(liveMail, liveApps, liveDocs);
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      [liveMail, liveApps, liveDocs]
+    );
+    mgr.window.gZenWorkspaces._allStoredTabs = [liveMail, liveApps, liveDocs];
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs({ dryRun: true });
+
+    const createActions = (result.plan ?? []).filter(p => p.action === "create-tab");
+    assert.equal(createActions.length, 1, "dry-run should plan one missing essential tab");
+    assert.equal(result.created, 1, "created counter should reflect planned create");
+  });
+
   test("phantom essentials (attribute set but not pinned) are ignored and recreated properly", async () => {
     const mgr = makeSyncManagerWithTree();
     // Simulate a phantom essential from a broken previous restore:
@@ -1673,7 +1731,7 @@ describe("syncBookmarksToTabs — round-trip essentials", () => {
     assert.ok(restoredEss, "essential tab must be restored from bookmarks");
   });
 
-  test("round-trip with two spaces sharing same container deduplicates essentials", async () => {
+  test("round-trip with two spaces preserves essential multiplicity", async () => {
     const ws1 = { uuid: "uuid-w1", name: "Work", icon: null, theme: {}, containerTabId: 0 };
     const ws2 = { uuid: "uuid-w2", name: "Personal", icon: null, theme: {}, containerTabId: 0 };
     const ess1 = makeEssentialTab("https://mail.example.com", 0, ws1.uuid, { label: "Mail" });
@@ -1694,12 +1752,12 @@ describe("syncBookmarksToTabs — round-trip essentials", () => {
     const result = await sm.syncBookmarksToTabs();
     assert.equal(result.errors.length, 0, "restore must succeed");
 
-    // Only 1 essential tab should be created (deduplicated), plus 1 pinned.
+    // Two matching essential bookmarks should restore as two essential tabs.
     const tabs = mgr.window.gBrowser.tabs;
     const essentialCount = tabs.filter(
       t => t.linkedBrowser.currentURI.spec === "https://mail.example.com"
     ).length;
-    assert.equal(essentialCount, 1, "shared essential must be created only once");
+    assert.equal(essentialCount, 2, "shared essential bookmarks should preserve multiplicity");
   });
 });
 

@@ -1163,12 +1163,9 @@ export class SimpleBookmarkSyncManager {
   /**
    * Build the desired essential tab list across all space folders.
    *
-   * Essentials are shared globally, so identical entries repeated across spaces
-   * should not multiply. However, real duplicates inside a space folder must be
-   * preserved so restore can recreate the same multiplicity.
-   *
-   * Strategy: for each (url, containerName) key, keep the maximum count seen in
-   * any single space, then expand back to a flat desired array.
+   * Preserve multiplicity from bookmark data: each bookmark entry represents one
+   * desired essential tab. Duplicates are therefore intentional and must be
+   * restored one-for-one, even when they are spread across spaces.
    *
    * @returns {Array<{ url, title, containerName }>}
    */
@@ -1176,14 +1173,9 @@ export class SimpleBookmarkSyncManager {
     const desiredByKey = new Map(); // key -> { url, title, containerName, count }
 
     for (const sf of spaceFolders) {
-      const countsInSpace = new Map(); // key -> count in this space
-
       for (const ef of sf.essentials) {
         for (const item of ef.items) {
           const key = `${item.url}::${ef.containerName}`;
-          const current = countsInSpace.get(key) ?? 0;
-          countsInSpace.set(key, current + 1);
-
           if (!desiredByKey.has(key)) {
             desiredByKey.set(key, {
               url: item.url,
@@ -1192,13 +1184,8 @@ export class SimpleBookmarkSyncManager {
               count: 0,
             });
           }
+          desiredByKey.get(key).count++;
         }
-      }
-
-      for (const [key, count] of countsInSpace.entries()) {
-        const entry = desiredByKey.get(key);
-        if (!entry) continue;
-        if (count > entry.count) entry.count = count;
       }
     }
 
