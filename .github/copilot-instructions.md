@@ -48,6 +48,7 @@ ZenTabsManager/
     ├── TabManager.mjs      # Tab enumeration, metadata cache, filtering
     ├── SimpleBookmarkSyncManager.mjs  # Idempotent bookmark sync (tabs↔bookmarks)
     ├── CleanupManager.mjs  # Age-based cleanup and memory optimization
+  ├── TabPublishManager.mjs  # JSON + dashboard generation and SFTP publish
     └── UI.mjs              # Toolbar button (XUL), dropdown menu, keyboard shortcuts
 ```
 
@@ -60,7 +61,7 @@ ZenTabsManager/
 1. Sine loads `engine/zen.sys.mjs` as the entry point (declared in `theme.json` under `scripts`).
 2. A `WeakMap<window, ZenTabsManager>` (`windowManagers`) stores one `ZenTabsManager` instance **per chrome window**. When Sine calls the entry point for a window, a new instance is created and stored in the map.
 3. `init(win)` loads preferences from `Services.prefs`, waits for `gBrowser` to be ready, then dynamically imports managers.
-4. Managers are initialized sequentially: `TabManager` → `SimpleBookmarkSyncManager` → `CleanupManager` → `UIManager`.
+4. Managers are initialized sequentially: `TabManager` → `SimpleBookmarkSyncManager` → `CleanupManager` → `TabPublishManager` → `UIManager`.
 5. `window.ZenTabsManager` and `window.ZenTabsAPI` are set on the chrome window for console access.
 
 ### Class Responsibilities
@@ -69,6 +70,7 @@ ZenTabsManager/
 - **`TabManager`** (`content/TabManager.mjs`): Maintains an in-memory `Map<tab, metadata>` cache. Extracts type/state/workspace/folder/URL from each tab. Provides `getAllTabs()`, `getTabsFiltered(filters)`, `getStatistics()`.
 - **`SimpleBookmarkSyncManager`** (`content/SimpleBookmarkSyncManager.mjs`): Idempotent overwrite-based bookmark sync. Stores bookmarks under `ZenTabs/<SpaceName>/` with optional space metadata annotations. Supports `syncTabsToBookmarks()` (tabs → bookmarks) and `syncBookmarksToTabs()` (bookmarks → tabs, with optional dry-run). Uses pool-based matching. No manifest required.
 - **`CleanupManager`** (`content/CleanupManager.mjs`): Age-based tab closure and memory optimization. Also supports **auto-unload of idle tabs** (`unloadStaleTabs()`) based on `autoUnloadDelay`. Memory reporting uses `ChromeUtils.requestProcInfo()` and `Services.sysinfo`. Respects `keepEssentialTabs` and `keepPinnedTabs` preferences.
+- **`TabPublishManager`** (`content/TabPublishManager.mjs`): Builds `tabs.json` and a static `index.html` dashboard, writes them to profile temp, and uploads both files to an SFTP destination using the system `sftp` CLI.
 - **`UIManager`** (`content/UI.mjs`): Creates a XUL `toolbarbutton` in `#nav-bar` with a `menupopup`. Registers keyboard shortcuts via `document.addEventListener("keydown", ...)`.
 - **`ResultFormatter`** (`content/ResultFormatter.mjs`): Builds normalized, UI-friendly view models for action result dialogs (tab list, sync summaries, restore dry-run plan, cleanup/memory summaries, statistics, and errors).
 - **`ZenTabsAPI`** (`zen.api.mjs`): Thin facade over `window.ZenTabsManager`. All methods guard against uninitialized state.
@@ -198,6 +200,12 @@ Stored under `Services.prefs.getBranch("zentabs.")` as a JSON string in `"prefer
 | `keepPinnedTabs` | `true` | Never close/unload pinned tabs |
 | `showToolbarButton` | `true` | Show the toolbar button in `#nav-bar` |
 | `debugMode` | `false` | Verbose logging to browser console |
+| `publishSftpHost` | `""` | SFTP host used for dashboard upload |
+| `publishSftpPort` | `22` | SFTP port |
+| `publishSftpUser` | `""` | SFTP username |
+| `publishSftpRemoteDir` | `""` | Remote directory where `tabs.json` and `index.html` are uploaded |
+| `publishSftpPrivateKeyPath` | `""` | Optional SSH private key path for SFTP authentication |
+| `publishSftpDashboardTitle` | `"ZenTabs Dashboard"` | Page title used in generated dashboard HTML |
 
 ## Coding Conventions
 
@@ -221,6 +229,7 @@ await ZenTabsAPI.cleanupOldTabs({ maxAge: 7, dryRun: true })
 await ZenTabsAPI.optimizeMemory({ force: true })
 await ZenTabsAPI.getStatistics()
 await ZenTabsAPI.exportToJSON()
+await ZenTabsAPI.publishTabsToSftp()
 ZenTabsAPI.getPreferences()
 await ZenTabsAPI.setPreferences({ cleanupAge: 14 })
 ZenTabsAPI.on('cleanup-completed', (data) => console.log(data))
@@ -279,6 +288,7 @@ All approved feature specs live in the `specs/` directory. Consult the relevant 
 | `specs/BookmarksToTabsSync.spec.md` | Reverse sync: bookmarks → tabs with dry-run mode | Implemented — 2026-04-14 |
 | `specs/ActionResultsWindow.spec.md` | Compact action results dialog for list/sync/restore/dry-run/cleanup/memory/statistics | Implemented — 2026-06-24 |
 | `specs/SyncToBookmarksDryRun.spec.md` | Replace List All Tabs with Sync to Bookmarks dry-run preview | Implemented — 2026-06-24 |
+| `specs/SftpTabPublish.spec.md` | Export tabs to JSON + static dashboard and upload to SFTP | Implemented — 2026-06-24 |
 
 ---
 
@@ -307,6 +317,7 @@ All approved feature specs live in the `specs/` directory. Consult the relevant 
 | `content/SimpleBookmarkSyncManager.mjs` | `tests/SimpleBookmarkSyncManager.test.mjs` |
 | `content/TabManager.mjs` | `tests/TabManager.test.mjs` |
 | `content/CleanupManager.mjs` | `tests/CleanupManager.test.mjs` |
+| `content/TabPublishManager.mjs` | `tests/TabPublishManager.test.mjs` |
 | `content/UI.mjs` | UI is XUL-only — no unit tests; verify manually in browser |
 | `content/ResultFormatter.mjs` | `tests/ResultFormatter.test.mjs` |
 | `engine/zen.sys.mjs` | Lifecycle/init — no unit tests; verified via integration |

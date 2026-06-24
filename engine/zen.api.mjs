@@ -94,6 +94,16 @@ export const ZenTabsAPI = {
     }, null, 2);
   },
 
+  async publishTabsToSftp(options = {}) {
+    if (typeof window.ZenTabsManager === "undefined") {
+      throw new Error("ZenTabsManager not initialized");
+    }
+    if (!window.ZenTabsManager.tabPublishManager) {
+      throw new Error("TabPublishManager not initialized");
+    }
+    return window.ZenTabsManager.tabPublishManager.publishTabsToSftp(options);
+  },
+
   pause() {
     if (typeof window.ZenTabsManager === "undefined") throw new Error("ZenTabsManager not initialized");
     window.ZenTabsManager.pause();

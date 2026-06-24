@@ -16,6 +16,7 @@ class ZenTabsManager {
     this.tabManager = null;
     this.cleanupManager = null;
     this.simpleBookmarkSyncManager = null;
+    this.tabPublishManager = null;
     this.uiManager = null;
     this.events = new EventTarget();
     
@@ -133,6 +134,7 @@ class ZenTabsManager {
     const { TabManager } = await import("../content/TabManager.mjs");
     const { CleanupManager } = await import("../content/CleanupManager.mjs");
     const { SimpleBookmarkSyncManager } = await import("../content/SimpleBookmarkSyncManager.mjs");
+    const { TabPublishManager } = await import("../content/TabPublishManager.mjs");
     
     this.tabManager = new TabManager(this);
     await this.tabManager.init();
@@ -142,6 +144,9 @@ class ZenTabsManager {
 
     this.simpleBookmarkSyncManager = new SimpleBookmarkSyncManager(this);
     await this.simpleBookmarkSyncManager.init();
+
+    this.tabPublishManager = new TabPublishManager(this);
+    await this.tabPublishManager.init();
     
     console.log("[ZenTabs] Managers loaded");
   }
@@ -204,7 +209,13 @@ class ZenTabsManager {
       keepEssentialTabs: true,
       keepPinnedTabs: true,
       showToolbarButton: true,
-      debugMode: false
+      debugMode: false,
+      publishSftpHost: "",
+      publishSftpPort: 22,
+      publishSftpUser: "",
+      publishSftpRemoteDir: "",
+      publishSftpPrivateKeyPath: "",
+      publishSftpDashboardTitle: "ZenTabs Dashboard"
     };
 
     try {

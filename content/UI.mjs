@@ -21,6 +21,7 @@ export class UIManager {
     this.toolbarButton = null;
     this.menuPopup = null;
     this.pauseMenuItem = null;
+    this.publishMenuItem = null;
     this.resultsDialog = null;
     this.log("UIManager created");
   }
@@ -83,6 +84,8 @@ export class UIManager {
       this.addMenuSeparator(popup);
       this.addMenuItem(popup, "Show Statistics", () => this.showStatistics());
       this.addMenuItem(popup, "Export to JSON", () => this.exportToJSON());
+      this.publishMenuItem = this.addMenuItem(popup, "Publish Tabs Dashboard", () => this.publishTabsDashboard());
+      this.refreshPublishMenuVisibility();
       this.addMenuSeparator(popup);
       this.addMenuItem(popup, "Settings...", () => this.openSettings());
       
@@ -96,6 +99,16 @@ export class UIManager {
     } catch (error) {
       console.error("Error creating toolbar button:", error);
     }
+  }
+
+  isSftpPublishConfigured() {
+    const prefs = this.manager.preferences ?? {};
+    return !!(prefs.publishSftpHost && prefs.publishSftpUser && prefs.publishSftpRemoteDir);
+  }
+
+  refreshPublishMenuVisibility() {
+    if (!this.publishMenuItem) return;
+    this.publishMenuItem.hidden = !this.isSftpPublishConfigured();
   }
 
   /**
@@ -404,6 +417,45 @@ export class UIManager {
     }
   }
 
+  async publishTabsDashboard() {
+    try {
+      if (!this.isSftpPublishConfigured()) {
+        this.showNotification("Publish Unavailable", "Configure SFTP settings first");
+        return;
+      }
+
+      const result = await this.manager.tabPublishManager.publishTabsToSftp();
+      if (result.success) {
+        this.openResultsWindow({
+          title: "ZenTabs - Publish Tabs Dashboard",
+          timestamp: result.exportedAt,
+          summary: [
+            { label: "Success", value: "Yes" },
+            { label: "Tabs", value: result.generated.tabCount },
+            { label: "JSON", value: result.generated.jsonFileName },
+            { label: "HTML", value: result.generated.htmlFileName },
+          ],
+          sections: [
+            {
+              heading: "Upload",
+              rows: [
+                { Target: result.target ?? "(configured server)", JSON: result.uploaded.json, HTML: result.uploaded.html },
+              ],
+            },
+          ],
+        });
+        this.showNotification("Publish Complete", `Uploaded ${result.generated.tabCount} tabs`);
+      } else {
+        const message = (result.errors ?? []).join("; ") || "Unknown error";
+        this.openResultsWindow(buildErrorResult("ZenTabs - Publish Tabs Dashboard", message));
+        this.showNotification("Publish Failed", message);
+      }
+    } catch (error) {
+      this.openResultsWindow(buildErrorResult("ZenTabs - Publish Tabs Dashboard", error));
+      this.showNotification("Publish Failed", String(error));
+    }
+  }
+
   openSettings() {
     const doc = this.manager.window.document;
 
@@ -457,6 +509,30 @@ export class UIManager {
       {
         key: "debugMode", label: "Debug logging", type: "checkbox",
         tooltip: "Enables verbose logging to the browser console (Cmd+Shift+J). Useful for troubleshooting sync or cleanup issues."
+      },
+      {
+        key: "publishSftpHost", label: "Publish SFTP host", type: "text",
+        tooltip: "SFTP hostname used to upload tabs.json and index.html."
+      },
+      {
+        key: "publishSftpPort", label: "Publish SFTP port", type: "number",
+        tooltip: "SFTP port (default 22)."
+      },
+      {
+        key: "publishSftpUser", label: "Publish SFTP user", type: "text",
+        tooltip: "SFTP username used for upload."
+      },
+      {
+        key: "publishSftpRemoteDir", label: "Publish SFTP remote directory", type: "text",
+        tooltip: "Remote directory where tabs.json and index.html are uploaded."
+      },
+      {
+        key: "publishSftpPrivateKeyPath", label: "Publish SFTP private key path", type: "text",
+        tooltip: "Optional path to SSH private key for SFTP authentication."
+      },
+      {
+        key: "publishSftpDashboardTitle", label: "Dashboard page title", type: "text",
+        tooltip: "Title displayed in the generated web dashboard."
       },
     ];
 
@@ -569,6 +645,7 @@ export class UIManager {
       }
       try {
         await this.manager.setPreferences(newPrefs);
+        this.refreshPublishMenuVisibility();
         this.showNotification("ZenTabs", "Settings saved");
         dialog.close();
       } catch (e) {
