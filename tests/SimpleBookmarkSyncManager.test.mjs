@@ -983,6 +983,23 @@ describe("_buildDesiredEssentials", () => {
     assert.equal(result.length, 1, "duplicate across spaces must be collapsed");
   });
 
+  test("preserves duplicate entries within the same space", () => {
+    const result = sm._buildDesiredEssentials([{
+      name: "Work",
+      essentials: [{
+        containerName: "Essentials",
+        items: [
+          { url: "https://a.com", title: "A" },
+          { url: "https://a.com", title: "A" },
+        ],
+      }],
+      pinned: [],
+    }]);
+
+    assert.equal(result.length, 2);
+    assert.equal(result.filter(r => r.url === "https://a.com").length, 2);
+  });
+
   test("keeps same URL in different containers as separate entries", () => {
     const result = sm._buildDesiredEssentials([{
       name: "Work",
@@ -1426,6 +1443,7 @@ describe("syncBookmarksToTabs — live", () => {
       pinned: true,
       attrs: { "zen-essential": "", "usercontextid": "0" },
     });
+    mgr.window.gBrowser.tabs.push(existingTab);
     mgr.window.gZenWorkspaces = makeGZenWorkspaces(
       [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
       [existingTab]
@@ -1433,6 +1451,41 @@ describe("syncBookmarksToTabs — live", () => {
     const sm = new SimpleBookmarkSyncManager(mgr);
     const result = await sm.syncBookmarksToTabs();
     assert.equal(result.created, 0, "existing essential tab must not be duplicated");
+  });
+
+  test("creates a second essential tab when bookmark essentials contain a duplicate", async () => {
+    const mgr = makeSyncManagerWithTree();
+
+    // Add duplicate essential bookmark entry for the same URL.
+    mgr.window.PlacesUtils.bookmarks._store.set("bm-mail-2", {
+      guid: "bm-mail-2",
+      parentGuid: "ess-work",
+      type: "bookmark",
+      title: "Mail Duplicate",
+      url: "https://mail.com",
+    });
+
+    // One existing essential tab is already live.
+    const existingTab = makeTab({
+      url: "https://mail.com",
+      pinned: true,
+      attrs: { "zen-essential": "", "usercontextid": "0" },
+    });
+    mgr.window.gBrowser.tabs.push(existingTab);
+    mgr.window.gZenWorkspaces = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      [existingTab]
+    );
+    mgr.window.gZenWorkspaces._allStoredTabs = [existingTab];
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs();
+
+    assert.equal(result.created, 1, "restore should create missing duplicate essential tab");
+    const mailTabs = mgr.window.gBrowser.tabs.filter(
+      t => t.linkedBrowser.currentURI.spec === "https://mail.com"
+    );
+    assert.equal(mailTabs.length, 2, "should have two essential tabs for duplicate bookmarks");
   });
 
   test("phantom essentials (attribute set but not pinned) are ignored and recreated properly", async () => {

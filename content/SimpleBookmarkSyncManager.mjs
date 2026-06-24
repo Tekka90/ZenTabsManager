@@ -1161,24 +1161,55 @@ export class SimpleBookmarkSyncManager {
   }
 
   /**
-   * Build the deduplicated desired essential tab list across all space folders.
-   * Duplicates (same URL + same container name) across multiple spaces are
-   * collapsed into a single entry — essentials are shared across spaces.
+   * Build the desired essential tab list across all space folders.
+   *
+   * Essentials are shared globally, so identical entries repeated across spaces
+   * should not multiply. However, real duplicates inside a space folder must be
+   * preserved so restore can recreate the same multiplicity.
+   *
+   * Strategy: for each (url, containerName) key, keep the maximum count seen in
+   * any single space, then expand back to a flat desired array.
    *
    * @returns {Array<{ url, title, containerName }>}
    */
   _buildDesiredEssentials(spaceFolders) {
-    const seen = new Set(); // key = `${url}::${containerName}`
-    const result = [];
+    const desiredByKey = new Map(); // key -> { url, title, containerName, count }
 
     for (const sf of spaceFolders) {
+      const countsInSpace = new Map(); // key -> count in this space
+
       for (const ef of sf.essentials) {
         for (const item of ef.items) {
           const key = `${item.url}::${ef.containerName}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          result.push({ url: item.url, title: item.title, containerName: ef.containerName });
+          const current = countsInSpace.get(key) ?? 0;
+          countsInSpace.set(key, current + 1);
+
+          if (!desiredByKey.has(key)) {
+            desiredByKey.set(key, {
+              url: item.url,
+              title: item.title,
+              containerName: ef.containerName,
+              count: 0,
+            });
+          }
         }
+      }
+
+      for (const [key, count] of countsInSpace.entries()) {
+        const entry = desiredByKey.get(key);
+        if (!entry) continue;
+        if (count > entry.count) entry.count = count;
+      }
+    }
+
+    const result = [];
+    for (const entry of desiredByKey.values()) {
+      for (let i = 0; i < entry.count; i++) {
+        result.push({
+          url: entry.url,
+          title: entry.title,
+          containerName: entry.containerName,
+        });
       }
     }
 
