@@ -27,7 +27,7 @@ export const ZenTabsAPI = {
     if (typeof window.ZenTabsManager === "undefined") {
       throw new Error("ZenTabsManager not initialized");
     }
-    return window.ZenTabsManager.simpleBookmarkSyncManager.syncTabsToBookmarks();
+    return window.ZenTabsManager.simpleBookmarkSyncManager.syncTabsToBookmarks(options);
   },
 
   async syncFromBookmarks(options = {}) {

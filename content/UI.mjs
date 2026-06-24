@@ -4,12 +4,24 @@
  * Handles toolbar buttons, settings panel, and other UI elements.
  */
 
+import {
+  buildSyncSummaryResult,
+  buildSyncDryRunResult,
+  buildRestoreSummaryResult,
+  buildRestoreDryRunResult,
+  buildCleanupSummaryResult,
+  buildMemorySummaryResult,
+  buildStatisticsResult,
+  buildErrorResult,
+} from "./ResultFormatter.mjs";
+
 export class UIManager {
   constructor(manager) {
     this.manager = manager;
     this.toolbarButton = null;
     this.menuPopup = null;
     this.pauseMenuItem = null;
+    this.resultsDialog = null;
     this.log("UIManager created");
   }
 
@@ -60,8 +72,8 @@ export class UIManager {
       this.addMenuSeparator(popup);
 
       // Add menu items
-      this.addMenuItem(popup, "List All Tabs", () => this.listAllTabs(), "Cmd+Shift+L");
       this.addMenuItem(popup, "Sync to Bookmarks", () => this.simpleSyncToBookmarks(), "Cmd+Shift+B");
+      this.addMenuItem(popup, "Sync to Bookmarks (dry run)", () => this.simpleSyncToBookmarksDryRun());
       this.addMenuSeparator(popup);
       this.addMenuItem(popup, "Restore from Bookmarks", () => this.simpleSyncFromBookmarks());
       this.addMenuItem(popup, "Restore from Bookmarks (dry run)", () => this.simpleSyncFromBookmarksDryRun());
@@ -131,10 +143,7 @@ export class UIManager {
   setupKeyboardShortcuts() {
     this.keyHandler = (event) => {
       if ((event.metaKey || event.ctrlKey) && event.shiftKey) {
-        if (event.key === 'L') {
-          event.preventDefault();
-          this.listAllTabs();
-        } else if (event.key === 'B') {
+        if (event.key === 'B') {
           event.preventDefault();
           this.simpleSyncToBookmarks();
         } else if (event.key === 'M') {
@@ -163,46 +172,19 @@ export class UIManager {
   /**
    * UI Actions
    */
-  async listAllTabs() {
-    console.log("\n" + "=".repeat(80));
-    console.log("📑 ZENTABS MANAGER - ALL TABS");
-    console.log("=".repeat(80) + "\n");
-    
-    const tabs = await this.manager.tabManager.getAllTabs();
-    const stats = await this.manager.tabManager.getStatistics();
-    
-    console.log(`📊 Total: ${stats.total} tabs`);
-    console.log(`   Essential: ${stats.byType.essential}`);
-    console.log(`   Pinned: ${stats.byType.pinned}`);
-    console.log(`   Normal: ${stats.byType.normal}`);
-    console.log(`   In folders: ${stats.inFolders}`);
-    console.log(`   Workspaces: ${stats.workspaces}\n`);
-    
-    tabs.forEach((tab, index) => {
-      const emoji = tab.type === "essential" ? "⭐" : tab.type === "pinned" ? "📌" : "📄";
-      console.log(`[${index + 1}] ${emoji} ${tab.title}`);
-      console.log(`    Type: ${tab.type} | State: ${tab.state.join(", ")}`);
-      if (tab.folderPath) {
-        console.log(`    Folder: 📁 ${tab.folderPath.join(" / ")}`);
-      }
-      console.log(`    URL: ${tab.url}`);
-      console.log(`    Age: ${tab.lastAccessedAge.days}d ${tab.lastAccessedAge.hours % 24}h\n`);
-    });
-    
-    console.log("=".repeat(80) + "\n");
-  }
-
   async simpleSyncFromBookmarks() {
     console.log("[ZenTabs] Restore — syncing bookmarks to tabs...");
     try {
       const result = await this.manager.simpleBookmarkSyncManager.syncBookmarksToTabs();
       console.log("Restore complete:", result);
+      this.openResultsWindow(buildRestoreSummaryResult(result));
       this.showNotification(
         "Restore Complete",
         `Created ${result.created}, deleted ${result.deleted}`
       );
     } catch (error) {
       console.error("[ZenTabs] Restore failed:", error);
+      this.openResultsWindow(buildErrorResult("ZenTabs - Restore From Bookmarks", error));
       this.showNotification("Restore Failed", String(error));
     }
   }
@@ -212,12 +194,14 @@ export class UIManager {
     try {
       const result = await this.manager.simpleBookmarkSyncManager.syncBookmarksToTabs({ dryRun: true });
       console.log("[ZenTabs][DryRun] Plan:", result.plan);
+      this.openResultsWindow(buildRestoreDryRunResult(result));
       this.showNotification(
         "Dry Run Complete",
         `Would create ${result.created}, delete ${result.deleted} tabs — see console`
       );
     } catch (error) {
       console.error("[ZenTabs] Dry run failed:", error);
+      this.openResultsWindow(buildErrorResult("ZenTabs - Restore Dry Run", error));
       this.showNotification("Dry Run Failed", String(error));
     }
   }
@@ -227,13 +211,32 @@ export class UIManager {
     try {
       const result = await this.manager.simpleBookmarkSyncManager.syncTabsToBookmarks();
       console.log("✅ New Sync complete:", result);
+      this.openResultsWindow(buildSyncSummaryResult(result));
       this.showNotification(
         "New Sync Complete",
         `Created ${result.created}, updated ${result.updated}, deleted ${result.deleted}`
       );
     } catch (error) {
       console.error("[ZenTabs] New Sync failed:", error);
+      this.openResultsWindow(buildErrorResult("ZenTabs - Sync To Bookmarks", error));
       this.showNotification("New Sync Failed", String(error));
+    }
+  }
+
+  async simpleSyncToBookmarksDryRun() {
+    console.log("[ZenTabs] Sync (dry-run) — previewing tabs->bookmarks changes...");
+    try {
+      const result = await this.manager.simpleBookmarkSyncManager.syncTabsToBookmarks({ dryRun: true });
+      console.log("[ZenTabs][DryRun] Sync plan:", result.plan);
+      this.openResultsWindow(buildSyncDryRunResult(result));
+      this.showNotification(
+        "Dry Run Complete",
+        `Would create ${result.created}, update ${result.updated}, delete ${result.deleted} bookmarks`
+      );
+    } catch (error) {
+      console.error("[ZenTabs] Sync dry run failed:", error);
+      this.openResultsWindow(buildErrorResult("ZenTabs - Sync To Bookmarks Dry Run", error));
+      this.showNotification("Dry Run Failed", String(error));
     }
   }
 
@@ -243,45 +246,141 @@ export class UIManager {
     if (!confirmed) return;
     
     console.log("🧹 Cleaning up old tabs...");
-    const result = await this.manager.cleanupManager.cleanupOldTabs();
-    console.log("✅ Cleanup complete:", result);
-    this.showNotification("Cleanup Complete", `Closed ${result.closed} old tabs`);
+    try {
+      const result = await this.manager.cleanupManager.cleanupOldTabs();
+      console.log("✅ Cleanup complete:", result);
+      this.openResultsWindow(buildCleanupSummaryResult(result));
+      this.showNotification("Cleanup Complete", `Closed ${result.closed} old tabs`);
+    } catch (error) {
+      this.openResultsWindow(buildErrorResult("ZenTabs - Cleanup Old Tabs", error));
+      this.showNotification("Cleanup Failed", String(error));
+    }
   }
 
   async optimizeMemory() {
     console.log("💾 Optimizing memory...");
-    const result = await this.manager.cleanupManager.optimizeMemory({ force: true });
-    console.log("✅ Memory optimization complete:", result);
-    this.showNotification("Memory Optimized", `Unloaded ${result.unloaded} tabs, saved ~${result.saved}MB`);
+    try {
+      const result = await this.manager.cleanupManager.optimizeMemory({ force: true });
+      console.log("✅ Memory optimization complete:", result);
+      this.openResultsWindow(buildMemorySummaryResult(result));
+      this.showNotification("Memory Optimized", `Unloaded ${result.unloaded} tabs, saved ~${result.saved}MB`);
+    } catch (error) {
+      this.openResultsWindow(buildErrorResult("ZenTabs - Optimize Memory", error));
+      this.showNotification("Optimize Failed", String(error));
+    }
   }
 
   async showStatistics() {
-    console.log("\n" + "=".repeat(80));
-    console.log("📊 ZENTABS STATISTICS");
-    console.log("=".repeat(80) + "\n");
-    
-    const stats = await this.manager.tabManager.getStatistics();
-    const memoryInfo = await this.manager.cleanupManager.getMemoryInfo();
-    
-    console.log("📑 Tabs:");
-    console.log(`   Total: ${stats.total}`);
-    console.log(`   Essential: ${stats.byType.essential}`);
-    console.log(`   Pinned: ${stats.byType.pinned}`);
-    console.log(`   Normal: ${stats.byType.normal}`);
-    console.log(`   In folders: ${stats.inFolders}`);
-    console.log(`   Folders: ${stats.folders}`);
-    console.log(`   Workspaces: ${stats.workspaces}\n`);
-    
-    console.log("💾 Memory:");
-    console.log(`   Usage: ${memoryInfo.percentUsed}%`);
-    console.log(`   Estimated savings from unloaded tabs: ~${stats.memorySavings}MB\n`);
-    
-    console.log("📈 States:");
-    for (const [state, count] of Object.entries(stats.byState)) {
-      console.log(`   ${state}: ${count}`);
+    try {
+      const stats = await this.manager.tabManager.getStatistics();
+      const memoryInfo = await this.manager.cleanupManager.getMemoryInfo();
+      this.openResultsWindow(buildStatisticsResult({ stats, memoryInfo }));
+    } catch (error) {
+      this.openResultsWindow(buildErrorResult("ZenTabs - Statistics", error));
     }
-    
-    console.log("\n" + "=".repeat(80) + "\n");
+  }
+
+  openResultsWindow(viewModel) {
+    const doc = this.manager.window.document;
+    if (!doc) {
+      console.log("[ZenTabs] Results:", viewModel);
+      return;
+    }
+
+    doc.getElementById("zentabs-results-dialog")?.remove();
+
+    const dialog = doc.createElementNS("http://www.w3.org/1999/xhtml", "dialog");
+    dialog.id = "zentabs-results-dialog";
+    dialog.style.cssText = "padding:16px; min-width:640px; max-width:880px; width:70vw; max-height:78vh; border-radius:8px; border:1px solid #ccc; font-family:system-ui,sans-serif;";
+
+    const title = doc.createElementNS("http://www.w3.org/1999/xhtml", "h2");
+    title.textContent = viewModel.title || "ZenTabs - Results";
+    title.style.cssText = "margin:0 0 8px; font-size:16px;";
+    dialog.appendChild(title);
+
+    const subtitle = doc.createElementNS("http://www.w3.org/1999/xhtml", "div");
+    subtitle.textContent = `Generated at ${new Date(viewModel.timestamp || Date.now()).toLocaleString()}`;
+    subtitle.style.cssText = "font-size:12px; color:#666; margin-bottom:12px;";
+    dialog.appendChild(subtitle);
+
+    const summaryWrap = doc.createElementNS("http://www.w3.org/1999/xhtml", "div");
+    summaryWrap.style.cssText = "display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;";
+    for (const item of viewModel.summary || []) {
+      const chip = doc.createElementNS("http://www.w3.org/1999/xhtml", "div");
+      chip.style.cssText = "padding:4px 8px; border:1px solid #ddd; border-radius:999px; font-size:12px; background:#fafafa;";
+      chip.textContent = `${item.label}: ${item.value}`;
+      summaryWrap.appendChild(chip);
+    }
+    dialog.appendChild(summaryWrap);
+
+    const body = doc.createElementNS("http://www.w3.org/1999/xhtml", "div");
+    body.style.cssText = "max-height:50vh; overflow:auto; border:1px solid #eee; border-radius:6px; padding:8px;";
+
+    if (viewModel.emptyState) {
+      const empty = doc.createElementNS("http://www.w3.org/1999/xhtml", "div");
+      empty.style.cssText = "font-size:13px; color:#666; padding:6px 2px;";
+      empty.textContent = viewModel.emptyState;
+      body.appendChild(empty);
+    }
+
+    for (const section of viewModel.sections || []) {
+      const heading = doc.createElementNS("http://www.w3.org/1999/xhtml", "h3");
+      heading.textContent = section.heading;
+      heading.style.cssText = "margin:8px 0 6px; font-size:13px;";
+      body.appendChild(heading);
+
+      if (!section.rows || section.rows.length === 0) {
+        const none = doc.createElementNS("http://www.w3.org/1999/xhtml", "div");
+        none.style.cssText = "font-size:12px; color:#777; margin-bottom:8px;";
+        none.textContent = "No rows.";
+        body.appendChild(none);
+        continue;
+      }
+
+      const columns = Object.keys(section.rows[0]);
+      const table = doc.createElementNS("http://www.w3.org/1999/xhtml", "table");
+      table.style.cssText = "width:100%; border-collapse:collapse; margin-bottom:10px; table-layout:fixed;";
+
+      const thead = doc.createElementNS("http://www.w3.org/1999/xhtml", "thead");
+      const htr = doc.createElementNS("http://www.w3.org/1999/xhtml", "tr");
+      for (const col of columns) {
+        const th = doc.createElementNS("http://www.w3.org/1999/xhtml", "th");
+        th.textContent = col;
+        th.style.cssText = "font-size:11px; text-align:left; border-bottom:1px solid #ddd; padding:4px;";
+        htr.appendChild(th);
+      }
+      thead.appendChild(htr);
+      table.appendChild(thead);
+
+      const tbody = doc.createElementNS("http://www.w3.org/1999/xhtml", "tbody");
+      for (const row of section.rows) {
+        const tr = doc.createElementNS("http://www.w3.org/1999/xhtml", "tr");
+        for (const col of columns) {
+          const td = doc.createElementNS("http://www.w3.org/1999/xhtml", "td");
+          td.textContent = row[col] === undefined || row[col] === null ? "" : String(row[col]);
+          td.style.cssText = "font-size:12px; vertical-align:top; border-bottom:1px solid #f1f1f1; padding:4px; overflow-wrap:anywhere;";
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      body.appendChild(table);
+    }
+
+    dialog.appendChild(body);
+
+    const buttonRow = doc.createElementNS("http://www.w3.org/1999/xhtml", "div");
+    buttonRow.style.cssText = "display:flex; justify-content:flex-end; margin-top:12px;";
+    const closeBtn = doc.createElementNS("http://www.w3.org/1999/xhtml", "button");
+    closeBtn.textContent = "Close";
+    closeBtn.style.cssText = "padding:6px 16px; font-size:13px; cursor:pointer;";
+    closeBtn.addEventListener("click", () => dialog.close());
+    buttonRow.appendChild(closeBtn);
+    dialog.appendChild(buttonRow);
+
+    doc.documentElement.appendChild(dialog);
+    dialog.showModal();
+    this.resultsDialog = dialog;
   }
 
   async exportToJSON() {
@@ -503,6 +602,8 @@ export class UIManager {
    * Shutdown
    */
   async shutdown() {
+    this.resultsDialog?.remove();
+
     if (this.keyHandler) {
       this.manager.window.removeEventListener("keydown", this.keyHandler, true);
     }

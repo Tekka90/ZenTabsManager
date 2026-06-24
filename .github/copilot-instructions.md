@@ -70,6 +70,7 @@ ZenTabsManager/
 - **`SimpleBookmarkSyncManager`** (`content/SimpleBookmarkSyncManager.mjs`): Idempotent overwrite-based bookmark sync. Stores bookmarks under `ZenTabs/<SpaceName>/` with optional space metadata annotations. Supports `syncTabsToBookmarks()` (tabs → bookmarks) and `syncBookmarksToTabs()` (bookmarks → tabs, with optional dry-run). Uses pool-based matching. No manifest required.
 - **`CleanupManager`** (`content/CleanupManager.mjs`): Age-based tab closure and memory optimization. Also supports **auto-unload of idle tabs** (`unloadStaleTabs()`) based on `autoUnloadDelay`. Memory reporting uses `ChromeUtils.requestProcInfo()` and `Services.sysinfo`. Respects `keepEssentialTabs` and `keepPinnedTabs` preferences.
 - **`UIManager`** (`content/UI.mjs`): Creates a XUL `toolbarbutton` in `#nav-bar` with a `menupopup`. Registers keyboard shortcuts via `document.addEventListener("keydown", ...)`.
+- **`ResultFormatter`** (`content/ResultFormatter.mjs`): Builds normalized, UI-friendly view models for action result dialogs (tab list, sync summaries, restore dry-run plan, cleanup/memory summaries, statistics, and errors).
 - **`ZenTabsAPI`** (`zen.api.mjs`): Thin facade over `window.ZenTabsManager`. All methods guard against uninitialized state.
 
 ### Event System
@@ -213,6 +214,7 @@ ZenTabsAPI.getVersion()                          // "1.0.0"
 await ZenTabsAPI.listAllTabs()                   // full tab metadata array
 await ZenTabsAPI.getTabsFiltered({ olderThan: 7, type: 'normal' })
 await ZenTabsAPI.syncToBookmarks()
+await ZenTabsAPI.syncToBookmarks({ dryRun: true })
 await ZenTabsAPI.syncFromBookmarks()
 await ZenTabsAPI.syncFromBookmarks({ dryRun: true })
 await ZenTabsAPI.cleanupOldTabs({ maxAge: 7, dryRun: true })
@@ -275,6 +277,8 @@ All approved feature specs live in the `specs/` directory. Consult the relevant 
 | `specs/SimpleBookmarkSync.spec.md` | Idempotent tab-to-bookmark sync (`SimpleBookmarkSyncManager`) | Implemented |
 | `specs/SpaceMetadataSync.spec.md` | Space icon/theme metadata in bookmarks + rename detection | Implemented — 2026-04-14 |
 | `specs/BookmarksToTabsSync.spec.md` | Reverse sync: bookmarks → tabs with dry-run mode | Implemented — 2026-04-14 |
+| `specs/ActionResultsWindow.spec.md` | Compact action results dialog for list/sync/restore/dry-run/cleanup/memory/statistics | Implemented — 2026-06-24 |
+| `specs/SyncToBookmarksDryRun.spec.md` | Replace List All Tabs with Sync to Bookmarks dry-run preview | Implemented — 2026-06-24 |
 
 ---
 
@@ -304,4 +308,5 @@ All approved feature specs live in the `specs/` directory. Consult the relevant 
 | `content/TabManager.mjs` | `tests/TabManager.test.mjs` |
 | `content/CleanupManager.mjs` | `tests/CleanupManager.test.mjs` |
 | `content/UI.mjs` | UI is XUL-only — no unit tests; verify manually in browser |
+| `content/ResultFormatter.mjs` | `tests/ResultFormatter.test.mjs` |
 | `engine/zen.sys.mjs` | Lifecycle/init — no unit tests; verified via integration |

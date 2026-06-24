@@ -23,10 +23,22 @@ export class SimpleBookmarkSyncManager {
    * Main entry point — full idempotent overwrite sync (tabs → bookmarks).
    * @returns {{ created: number, updated: number, deleted: number, errors: string[] }}
    */
-  async syncTabsToBookmarks() {
+  async syncTabsToBookmarks({ dryRun = false } = {}) {
     this.manager.dispatchEvent("simple-sync-started", {});
     const result = { created: 0, updated: 0, deleted: 0, errors: [],
       details: { titleUpdates: 0, reorders: 0, metadataUpdates: 0, folderCreates: 0, bookmarkCreates: 0 } };
+    if (dryRun) result.plan = [];
+
+    const dryRecord = (counterKey, action, description, extras = {}) => {
+      if (dryRun) {
+        result.plan.push({ action, description, ...extras });
+        this.log("[DryRun]", description);
+        if (counterKey) result[counterKey]++;
+        return false;
+      }
+      return true;
+    };
+    const maybeDryRecord = dryRun ? dryRecord : null;
 
     try {
       const PlacesUtils = this.manager.window.PlacesUtils;
@@ -38,17 +50,23 @@ export class SimpleBookmarkSyncManager {
       // 2. Get or create the ZenTabs root folder on the toolbar.
       const rootGuid = await this._getOrCreateFolder(
         PlacesUtils.bookmarks.toolbarGuid,
-        "ZenTabs"
+        "ZenTabs",
+        maybeDryRecord,
+        result
       );
 
       // 3. Get live spaces for rename detection and metadata sync.
       const liveSpaces = win.gZenWorkspaces?.getWorkspaces() ?? [];
 
-      // 4. Detect and apply renames before reconciling content.
-      await this._detectAndApplyRenames(rootGuid, liveSpaces, result);
+      if (dryRun && !rootGuid) {
+        this._planCreateTree(desiredRoot.children, dryRecord, result, "ZenTabs");
+      } else {
+        // 4. Detect and apply renames before reconciling content.
+        await this._detectAndApplyRenames(rootGuid, liveSpaces, result, maybeDryRecord);
 
-      // 5. Reconcile the desired tree against bookmarks.
-      await this._reconcileFolder(rootGuid, desiredRoot.children, result);
+        // 5. Reconcile the desired tree against bookmarks.
+        await this._reconcileFolder(rootGuid, desiredRoot.children, result, maybeDryRecord);
+      }
 
       // 6. Sync space metadata (icon, theme) after content.
       const syncedSpaces = liveSpaces.map(ws => ({
@@ -57,10 +75,11 @@ export class SimpleBookmarkSyncManager {
         theme: ws.theme ?? {},
         containerTabId: ws.containerTabId ?? 0,
       }));
-      await this._syncSpaceMetadata(rootGuid, syncedSpaces, result);
+      await this._syncSpaceMetadata(rootGuid, syncedSpaces, result, maybeDryRecord);
 
+      const tag = dryRun ? "(dry-run) " : "";
       this.log(
-        `Sync complete — created:${result.created} updated:${result.updated} deleted:${result.deleted}`,
+        `Sync ${tag}complete — created:${result.created} updated:${result.updated} deleted:${result.deleted}`,
         `| breakdown: titleUpdates=${result.details.titleUpdates} reorders=${result.details.reorders} metadataUpdates=${result.details.metadataUpdates}`
       );
       this.manager.dispatchEvent("simple-sync-completed", {
@@ -75,6 +94,29 @@ export class SimpleBookmarkSyncManager {
     }
 
     return result;
+  }
+
+  _planCreateTree(children, dryRecord, result, parentTitle = "") {
+    for (const child of children ?? []) {
+      if (child.type === "folder") {
+        dryRecord(
+          "created",
+          "create-folder",
+          `Create folder '${child.title}' under '${parentTitle || "root"}'`,
+          { title: child.title, parent: parentTitle }
+        );
+        result.details.folderCreates++;
+        this._planCreateTree(child.children, dryRecord, result, child.title);
+      } else if (child.type === "bookmark") {
+        dryRecord(
+          "created",
+          "create-bookmark",
+          `Create bookmark '${child.title}' (${child.url}) in '${parentTitle || "root"}'`,
+          { title: child.title, url: child.url, parent: parentTitle }
+        );
+        result.details.bookmarkCreates++;
+      }
+    }
   }
 
   /**
@@ -319,7 +361,7 @@ export class SimpleBookmarkSyncManager {
    * Creates missing items, updates changed titles, deletes stale items,
    * and enforces order.
    */
-  async _reconcileFolder(parentGuid, desiredChildren, result) {
+  async _reconcileFolder(parentGuid, desiredChildren, result, dryRecord = null) {
     const PlacesUtils = this.manager.window.PlacesUtils;
 
     // Fetch existing children of this folder.
@@ -352,7 +394,8 @@ export class SimpleBookmarkSyncManager {
           desired,
           existingBookmarks,
           matched,
-          result
+          result,
+          dryRecord
         );
         if (guid) desiredGuids.push(guid);
       } else {
@@ -361,7 +404,8 @@ export class SimpleBookmarkSyncManager {
           desired,
           existingFolders,
           matched,
-          result
+          result,
+          dryRecord
         );
         if (guid) desiredGuids.push(guid);
       }
@@ -373,8 +417,14 @@ export class SimpleBookmarkSyncManager {
       // Skip the __spaces__ metadata folder — managed separately by _syncSpaceMetadata().
       if (item.uri == null && item.title === "__spaces__") continue;
       try {
-        await PlacesUtils.bookmarks.remove(item.guid);
-        result.deleted++;
+        const action = item.uri == null ? "delete-folder" : "delete-bookmark";
+        const proceed = dryRecord
+          ? dryRecord("deleted", action, `Delete ${item.uri == null ? "folder" : "bookmark"} '${item.title}'`, { title: item.title, guid: item.guid })
+          : true;
+        if (proceed) {
+          await PlacesUtils.bookmarks.remove(item.guid);
+          result.deleted++;
+        }
       } catch (e) {
         result.errors.push(`delete ${item.guid}: ${e.message}`);
       }
@@ -382,14 +432,14 @@ export class SimpleBookmarkSyncManager {
 
     // Enforce order: check if the current order of desiredGuids in the folder
     // matches what we want; if not, reorder using index updates.
-    await this._enforceOrder(parentGuid, desiredGuids, result);
+    await this._enforceOrder(parentGuid, desiredGuids, result, dryRecord);
   }
 
   /**
    * Reconcile a single bookmark entry inside a folder.
    * Matches by URL (first available pool entry).  Returns the guid used.
    */
-  async _reconcileBookmark(parentGuid, desired, existingPool, matched, result) {
+  async _reconcileBookmark(parentGuid, desired, existingPool, matched, result, dryRecord = null) {
     const PlacesUtils = this.manager.window.PlacesUtils;
 
     // Find first unmatched existing bookmark with matching URL.
@@ -405,12 +455,19 @@ export class SimpleBookmarkSyncManager {
       // Update title if it changed.
       if (existing.title !== desired.title) {
         try {
-          await PlacesUtils.bookmarks.update({
-            guid: existing.guid,
-            title: desired.title,
-          });
-          result.updated++;
-          result.details.titleUpdates++;
+          const proceed = dryRecord
+            ? dryRecord("updated", "update-bookmark-title", `Update bookmark title '${existing.title}' -> '${desired.title}'`, { guid: existing.guid, from: existing.title, to: desired.title })
+            : true;
+          if (proceed) {
+            await PlacesUtils.bookmarks.update({
+              guid: existing.guid,
+              title: desired.title,
+            });
+            result.updated++;
+            result.details.titleUpdates++;
+          } else {
+            result.details.titleUpdates++;
+          }
         } catch (e) {
           result.errors.push(`update title ${existing.guid}: ${e.message}`);
         }
@@ -420,6 +477,13 @@ export class SimpleBookmarkSyncManager {
 
     // Not found — create it.
     try {
+      const proceed = dryRecord
+        ? dryRecord("created", "create-bookmark", `Create bookmark '${desired.title}' (${desired.url})`, { title: desired.title, url: desired.url })
+        : true;
+      if (!proceed) {
+        result.details.bookmarkCreates++;
+        return null;
+      }
       const bm = await PlacesUtils.bookmarks.insert({
         parentGuid,
         type: PlacesUtils.bookmarks.TYPE_BOOKMARK,
@@ -438,7 +502,7 @@ export class SimpleBookmarkSyncManager {
   /**
    * Reconcile a subfolder, then recurse.  Returns the guid used.
    */
-  async _reconcileSubFolder(parentGuid, desired, existingPool, matched, result) {
+  async _reconcileSubFolder(parentGuid, desired, existingPool, matched, result, dryRecord = null) {
     const PlacesUtils = this.manager.window.PlacesUtils;
 
     // Find first unmatched existing folder with matching title.
@@ -455,14 +519,23 @@ export class SimpleBookmarkSyncManager {
     } else {
       // Create new folder.
       try {
-        const folder = await PlacesUtils.bookmarks.insert({
-          parentGuid,
-          type: PlacesUtils.bookmarks.TYPE_FOLDER,
-          title: desired.title,
-        });
-        result.created++;
-        result.details.folderCreates++;
-        folderGuid = folder.guid;
+        const proceed = dryRecord
+          ? dryRecord("created", "create-folder", `Create folder '${desired.title}'`, { title: desired.title })
+          : true;
+        if (proceed) {
+          const folder = await PlacesUtils.bookmarks.insert({
+            parentGuid,
+            type: PlacesUtils.bookmarks.TYPE_FOLDER,
+            title: desired.title,
+          });
+          result.created++;
+          result.details.folderCreates++;
+          folderGuid = folder.guid;
+        } else {
+          result.details.folderCreates++;
+          this._planCreateTree(desired.children, dryRecord, result, desired.title);
+          return null;
+        }
       } catch (e) {
         result.errors.push(`create folder ${desired.title}: ${e.message}`);
         return null;
@@ -470,7 +543,7 @@ export class SimpleBookmarkSyncManager {
     }
 
     // Recurse into the folder's children.
-    await this._reconcileFolder(folderGuid, desired.children, result);
+    await this._reconcileFolder(folderGuid, desired.children, result, dryRecord);
     return folderGuid;
   }
 
@@ -479,7 +552,7 @@ export class SimpleBookmarkSyncManager {
    * Uses `PlacesUtils.bookmarks.update` to set the index of any item that
    * is out of position.
    */
-  async _enforceOrder(parentGuid, desiredGuids, result) {
+  async _enforceOrder(parentGuid, desiredGuids, result, dryRecord = null) {
     if (desiredGuids.length === 0) return;
 
     const PlacesUtils = this.manager.window.PlacesUtils;
@@ -495,9 +568,16 @@ export class SimpleBookmarkSyncManager {
       const guid = desiredGuids[i];
       if (currentIndex.get(guid) !== i) {
         try {
-          await PlacesUtils.bookmarks.update({ guid, parentGuid, index: i });
-          result.updated++;
-          result.details.reorders++;
+          const proceed = dryRecord
+            ? dryRecord("updated", "reorder-bookmark", `Reorder bookmark '${guid}' to index ${i}`, { guid, index: i })
+            : true;
+          if (proceed) {
+            await PlacesUtils.bookmarks.update({ guid, parentGuid, index: i });
+            result.updated++;
+            result.details.reorders++;
+          } else {
+            result.details.reorders++;
+          }
         } catch (e) {
           result.errors.push(`reorder ${guid}: ${e.message}`);
         }
@@ -511,7 +591,7 @@ export class SimpleBookmarkSyncManager {
    * Find-or-create a folder with `title` directly inside `parentGuid`.
    * Matches by title; returns the GUID of the folder.
    */
-  async _getOrCreateFolder(parentGuid, title) {
+  async _getOrCreateFolder(parentGuid, title, dryRecord = null, result = null) {
     const PlacesUtils = this.manager.window.PlacesUtils;
 
     const tree = await PlacesUtils.promiseBookmarksTree(parentGuid);
@@ -520,6 +600,11 @@ export class SimpleBookmarkSyncManager {
       c => c.uri == null && c.title === title
     );
     if (existing) return existing.guid;
+
+    if (dryRecord) {
+      dryRecord(null, "create-folder", `Create folder '${title}'`, { title, parentGuid });
+      return null;
+    }
 
     const folder = await PlacesUtils.bookmarks.insert({
       parentGuid,
@@ -591,7 +676,7 @@ export class SimpleBookmarkSyncManager {
    * (vs. deleted+new) using Jaccard URL-set similarity.
    * Applies renames in-place so the subsequent reconcile sees correct titles.
    */
-  async _detectAndApplyRenames(rootGuid, liveSpaces, result) {
+  async _detectAndApplyRenames(rootGuid, liveSpaces, result, dryRecord = null) {
     const PlacesUtils = this.manager.window.PlacesUtils;
 
     const tree = await PlacesUtils.promiseBookmarksTree(rootGuid);
@@ -658,7 +743,7 @@ export class SimpleBookmarkSyncManager {
         usedRemoved.add(rName);
         usedAdded.add(aName);
         await this._renameSpaceInBookmarks(
-          rootGuid, rName, aName, existingFolders, result
+          rootGuid, rName, aName, existingFolders, result, dryRecord
         );
       }
       // sim < 0.5 → treat as delete + new (handled by reconcile naturally).
@@ -700,15 +785,20 @@ export class SimpleBookmarkSyncManager {
   /**
    * Rename a space folder and its metadata bookmark from `oldName` to `newName`.
    */
-  async _renameSpaceInBookmarks(rootGuid, oldName, newName, existingFolders, result) {
+  async _renameSpaceInBookmarks(rootGuid, oldName, newName, existingFolders, result, dryRecord = null) {
     const PlacesUtils = this.manager.window.PlacesUtils;
 
     // Rename the content folder.
     const folder = existingFolders.find(f => f.title === oldName);
     if (folder) {
       try {
-        await PlacesUtils.bookmarks.update({ guid: folder.guid, title: newName });
-        result.updated++;
+        const proceed = dryRecord
+          ? dryRecord("updated", "rename-space-folder", `Rename folder '${oldName}' -> '${newName}'`, { from: oldName, to: newName })
+          : true;
+        if (proceed) {
+          await PlacesUtils.bookmarks.update({ guid: folder.guid, title: newName });
+          result.updated++;
+        }
       } catch (e) {
         result.errors.push(`rename folder ${oldName}→${newName}: ${e.message}`);
       }
@@ -726,8 +816,13 @@ export class SimpleBookmarkSyncManager {
           c => c.uri != null && c.title === oldName
         );
         if (metaBm) {
-          await PlacesUtils.bookmarks.update({ guid: metaBm.guid, title: newName });
-          result.updated++;
+          const proceed = dryRecord
+            ? dryRecord("updated", "rename-space-metadata", `Rename metadata '${oldName}' -> '${newName}'`, { from: oldName, to: newName })
+            : true;
+          if (proceed) {
+            await PlacesUtils.bookmarks.update({ guid: metaBm.guid, title: newName });
+            result.updated++;
+          }
         }
       }
     } catch (e) {
@@ -741,10 +836,17 @@ export class SimpleBookmarkSyncManager {
    * Upsert one metadata bookmark per space into the __spaces__/ folder.
    * syncedSpaces: Array<{ name, icon, theme }>
    */
-  async _syncSpaceMetadata(rootGuid, syncedSpaces, result) {
+  async _syncSpaceMetadata(rootGuid, syncedSpaces, result, dryRecord = null) {
     const PlacesUtils = this.manager.window.PlacesUtils;
 
-    const metaFolderGuid = await this._getOrCreateFolder(rootGuid, "__spaces__");
+    const metaFolderGuid = await this._getOrCreateFolder(rootGuid, "__spaces__", dryRecord, result);
+
+    if (dryRecord && !metaFolderGuid) {
+      for (const space of syncedSpaces) {
+        dryRecord("created", "create-metadata", `Create metadata for '${space.name}'`, { name: space.name });
+      }
+      return;
+    }
 
     const tree     = await PlacesUtils.promiseBookmarksTree(metaFolderGuid);
     const existing = tree?.children ?? [];
@@ -759,22 +861,34 @@ export class SimpleBookmarkSyncManager {
         matched.add(existing_.guid);
         if (existing_.uri !== encoded) {
           try {
-            await PlacesUtils.bookmarks.update({ guid: existing_.guid, url: encoded });
-            result.updated++;
-            result.details.metadataUpdates++;
+            const proceed = dryRecord
+              ? dryRecord("updated", "update-metadata", `Update metadata for '${space.name}'`, { name: space.name })
+              : true;
+            if (proceed) {
+              await PlacesUtils.bookmarks.update({ guid: existing_.guid, url: encoded });
+              result.updated++;
+              result.details.metadataUpdates++;
+            } else {
+              result.details.metadataUpdates++;
+            }
           } catch (e) {
             result.errors.push(`update metadata ${space.name}: ${e.message}`);
           }
         }
       } else {
         try {
-          await PlacesUtils.bookmarks.insert({
-            parentGuid: metaFolderGuid,
-            type:       PlacesUtils.bookmarks.TYPE_BOOKMARK,
-            title:      space.name,
-            url:        encoded,
-          });
-          result.created++;
+          const proceed = dryRecord
+            ? dryRecord("created", "create-metadata", `Create metadata for '${space.name}'`, { name: space.name })
+            : true;
+          if (proceed) {
+            await PlacesUtils.bookmarks.insert({
+              parentGuid: metaFolderGuid,
+              type:       PlacesUtils.bookmarks.TYPE_BOOKMARK,
+              title:      space.name,
+              url:        encoded,
+            });
+            result.created++;
+          }
         } catch (e) {
           result.errors.push(`create metadata ${space.name}: ${e.message}`);
         }
@@ -785,8 +899,13 @@ export class SimpleBookmarkSyncManager {
     for (const item of existing) {
       if (!matched.has(item.guid)) {
         try {
-          await PlacesUtils.bookmarks.remove(item.guid);
-          result.deleted++;
+          const proceed = dryRecord
+            ? dryRecord("deleted", "delete-metadata", `Delete stale metadata '${item.title}'`, { name: item.title })
+            : true;
+          if (proceed) {
+            await PlacesUtils.bookmarks.remove(item.guid);
+            result.deleted++;
+          }
         } catch (e) {
           result.errors.push(`delete metadata ${item.title}: ${e.message}`);
         }

@@ -486,6 +486,58 @@ describe("syncTabsToBookmarks", () => {
     // r1 created the structure
     assert.ok(r1.created > 0);
   });
+
+  test("dry-run returns plan and does not mutate bookmarks", async () => {
+    const ws = makeWorkspace("Work");
+    const tab = makeEssentialTab("https://example.com", 0, ws.uuid, {
+      label: "Example",
+    });
+    const sm = makeSyncManager([ws], [tab]);
+
+    const before = sm.manager.window.PlacesUtils.bookmarks._store.size;
+    const dry = await sm.syncTabsToBookmarks({ dryRun: true });
+    const after = sm.manager.window.PlacesUtils.bookmarks._store.size;
+
+    assert.ok(Array.isArray(dry.plan), "dry-run should include plan array");
+    assert.ok(dry.plan.length > 0, "dry-run plan should include actions");
+    assert.ok(dry.created > 0, "dry-run should report creations");
+    assert.equal(before, after, "dry-run must not mutate bookmarks store");
+  });
+
+  test("dry-run and live-run report the same counters for same state", async () => {
+    const ws = makeWorkspace("Work");
+    const tab = makeEssentialTab("https://example.com", 0, ws.uuid, {
+      label: "Example",
+    });
+
+    const smDry = makeSyncManager([ws], [tab]);
+    const dry = await smDry.syncTabsToBookmarks({ dryRun: true });
+
+    const smLive = makeSyncManager([ws], [tab]);
+    const live = await smLive.syncTabsToBookmarks();
+
+    assert.equal(dry.created, live.created);
+    assert.equal(dry.updated, live.updated);
+    assert.equal(dry.deleted, live.deleted);
+  });
+
+  test("dry-run plan contains only change-oriented actions", async () => {
+    const ws = makeWorkspace("Work");
+    const tab = makeEssentialTab("https://example.com", 0, ws.uuid, {
+      label: "Example",
+    });
+    const sm = makeSyncManager([ws], [tab]);
+
+    const dry = await sm.syncTabsToBookmarks({ dryRun: true });
+    assert.ok(Array.isArray(dry.plan));
+    const allowedPrefixes = ["create-", "update-", "delete-", "reorder-", "rename-"];
+    for (const entry of dry.plan) {
+      assert.ok(
+        allowedPrefixes.some((prefix) => String(entry.action || "").startsWith(prefix)),
+        `Unexpected dry-run action: ${entry.action}`
+      );
+    }
+  });
 });
 
 // ── _syncSpaceMetadata / readSpaceMetadata (T1–T7) ───────────────────────
