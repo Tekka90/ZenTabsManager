@@ -137,7 +137,19 @@ export class SimpleBookmarkSyncManager {
       const type = this._getTabType(tab);
       if (type === "normal") continue; // not synced
 
-      const wsId = tab.getAttribute("zen-workspace-id");
+      const rawWsId = tab.getAttribute("zen-workspace-id");
+      let wsId = rawWsId;
+
+      // Essential tabs can be global and may not carry a zen-workspace-id.
+      // To keep restore dry-runs stable, include them under the active space.
+      if (!wsId && type === "essential") {
+        wsId =
+          win.gZenWorkspaces?.activeWorkspace ??
+          win.gZenWorkspaces?.getActiveWorkspaceFromCache?.()?.uuid ??
+          win.gZenWorkspaces?.getWorkspaces?.()?.[0]?.uuid ??
+          null;
+      }
+
       // Skip tabs with no space assignment — they are transient/system tabs
       // that don't belong to any Zen Space and should not appear in sync output.
       if (!wsId) continue;
@@ -1549,7 +1561,10 @@ export class SimpleBookmarkSyncManager {
       if (pinnedContainer?.appendChild) {
         const currentItems = pinnedContainer._children
           ? pinnedContainer._children.filter(c => !c._emptyTab)
-          : [];
+          : Array.from(pinnedContainer.children ?? []).filter(c =>
+              !c.classList?.contains("zen-tab-group-start") &&
+              !c.classList?.contains("pinned-tabs-container-separator")
+            );
 
         if (!this._isOrderCorrect(currentItems, orderedRefs)) {
           const desc = `Reorder ${orderedRefs.length} root item(s) in space "${spaceName}"`;

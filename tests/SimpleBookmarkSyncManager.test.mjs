@@ -538,6 +538,32 @@ describe("syncTabsToBookmarks", () => {
       );
     }
   });
+
+  test("includes essential tabs without zen-workspace-id under active workspace", async () => {
+    const ws = makeWorkspace("Work", "uuid-work");
+    const essentialGlobal = makeTab({
+      url: "https://myapps.microsoft.com/",
+      pinned: true,
+      attrs: { "zen-essential": "" },
+      label: "MyApps",
+    });
+
+    const mgr = makeManager({ workspaces: [ws], tabs: [essentialGlobal] });
+    mgr.window.gZenWorkspaces._activeUuid = ws.uuid;
+    const sm = new SimpleBookmarkSyncManager(mgr);
+
+    const result = await sm.syncTabsToBookmarks();
+    assert.equal(result.errors.length, 0);
+
+    const tree = await mgr.window.PlacesUtils.promiseBookmarksTree(
+      mgr.window.PlacesUtils.bookmarks.toolbarGuid
+    );
+    const zenTabs = (tree?.children ?? []).find(c => c.uri == null && c.title === "ZenTabs");
+    assert.ok(zenTabs, "ZenTabs folder should exist");
+    const zenTabsTree = await mgr.window.PlacesUtils.promiseBookmarksTree(zenTabs.guid);
+    const workFolder = (zenTabsTree?.children ?? []).find(c => c.uri == null && c.title === "Work");
+    assert.ok(workFolder, "Active workspace folder should include global essential tab");
+  });
 });
 
 // ── _syncSpaceMetadata / readSpaceMetadata (T1–T7) ───────────────────────
@@ -1808,6 +1834,37 @@ describe("syncBookmarksToTabs — tab ordering matches bookmark order", () => {
     const result = await sm.syncBookmarksToTabs();
     assert.equal(result.errors.length, 0);
     assert.equal(result.updated, 0, "no reorder needed — already correct");
+  });
+
+  test("root reorder check works when pinned container exposes children but no _children", async () => {
+    const mgr   = makeManager();
+    const store = mgr.window.PlacesUtils.bookmarks._store;
+    store.clear();
+    store.set("toolbar",  { guid: "toolbar",  parentGuid: null,       type: "folder",   title: "Bookmarks Toolbar", url: null });
+    store.set("zt",       { guid: "zt",       parentGuid: "toolbar",  type: "folder",   title: "ZenTabs",          url: null });
+    store.set("ws",       { guid: "ws",       parentGuid: "zt",       type: "folder",   title: "Work",             url: null });
+    store.set("bm-a",     { guid: "bm-a",     parentGuid: "ws",       type: "bookmark", title: "Alpha",            url: "https://alpha.com" });
+    store.set("bm-b",     { guid: "bm-b",     parentGuid: "ws",       type: "bookmark", title: "Beta",             url: "https://beta.com" });
+
+    const tAlpha = makeTab({ url: "https://alpha.com", pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
+    const tBeta  = makeTab({ url: "https://beta.com",  pinned: true, attrs: { "zen-workspace-id": "uuid-work" } });
+
+    const gzw = makeGZenWorkspaces(
+      [{ uuid: "uuid-work", name: "Work", icon: null, theme: {}, containerTabId: 0 }],
+      [tAlpha, tBeta]
+    );
+    mgr.window.gZenWorkspaces = gzw;
+
+    const pc = gzw.workspaceElement("uuid-work").pinnedTabsContainer;
+    pc._children.push(tAlpha, tBeta);
+    pc.children = [tAlpha, tBeta];
+    delete pc._children;
+
+    const sm = new SimpleBookmarkSyncManager(mgr);
+    const result = await sm.syncBookmarksToTabs();
+
+    assert.equal(result.errors.length, 0);
+    assert.equal(result.updated, 0, "already-correct root order must not trigger reorder");
   });
 
   test("interleaved root tabs and folders preserve bookmark order", async () => {
