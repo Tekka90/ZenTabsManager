@@ -254,13 +254,21 @@ export class UIManager {
   }
 
   async cleanupOldTabs() {
-    const msg = `Clean up tabs older than ${this.manager.preferences.cleanupAge} days?`;
-    const confirmed = this.manager.window.Services.prompt.confirm(null, "ZenTabs Manager", msg);
-    if (!confirmed) return;
-    
-    console.log("🧹 Cleaning up old tabs...");
     try {
-      const result = await this.manager.cleanupManager.cleanupOldTabs();
+      const preview = await this.manager.cleanupManager.cleanupOldTabs({ dryRun: true });
+      preview.dryRun = true;
+      this.openResultsWindow(buildCleanupSummaryResult(preview));
+
+      const unit = this.manager.preferences.cleanupAgeUnit || "days";
+      const msg = `Preview complete. Execute cleanup now? This may close up to ${preview.closed} tabs older than ${this.manager.preferences.cleanupAge} ${unit}.`;
+      const confirmed = this.manager.window.Services.prompt.confirm(null, "ZenTabs Manager", msg);
+      if (!confirmed) {
+        this.showNotification("Cleanup Cancelled", "No tabs were closed");
+        return;
+      }
+
+      console.log("🧹 Cleaning up old tabs...");
+      const result = await this.manager.cleanupManager.cleanupOldTabs({ dryRun: false });
       console.log("✅ Cleanup complete:", result);
       this.openResultsWindow(buildCleanupSummaryResult(result));
       this.showNotification("Cleanup Complete", `Closed ${result.closed} old tabs`);
@@ -271,9 +279,19 @@ export class UIManager {
   }
 
   async optimizeMemory() {
-    console.log("💾 Optimizing memory...");
     try {
-      const result = await this.manager.cleanupManager.optimizeMemory({ force: true });
+      const preview = await this.manager.cleanupManager.optimizeMemory({ force: true, dryRun: true });
+      this.openResultsWindow(buildMemorySummaryResult(preview));
+
+      const msg = `Preview complete. Execute memory optimization now? This may unload up to ${preview.unloaded} tabs.`;
+      const confirmed = this.manager.window.Services.prompt.confirm(null, "ZenTabs Manager", msg);
+      if (!confirmed) {
+        this.showNotification("Optimize Cancelled", "No tabs were unloaded");
+        return;
+      }
+
+      console.log("💾 Optimizing memory...");
+      const result = await this.manager.cleanupManager.optimizeMemory({ force: true, dryRun: false });
       console.log("✅ Memory optimization complete:", result);
       this.openResultsWindow(buildMemorySummaryResult(result));
       this.showNotification("Memory Optimized", `Unloaded ${result.unloaded} tabs, saved ~${result.saved}MB`);

@@ -141,6 +141,7 @@ export function buildRestoreDryRunResult(result = {}) {
 }
 
 export function buildCleanupSummaryResult(result = {}) {
+  const isDryRun = !!result.dryRun;
   const rows = Array.isArray(result.tabs)
     ? result.tabs.map((tab) => ({
         Title: toStringValue(tab.title),
@@ -150,23 +151,25 @@ export function buildCleanupSummaryResult(result = {}) {
     : [];
 
   return {
-    title: "ZenTabs - Cleanup Old Tabs",
-    mode: "cleanup-summary",
+    title: isDryRun ? "ZenTabs - Cleanup Preview" : "ZenTabs - Cleanup Old Tabs",
+    mode: isDryRun ? "cleanup-preview" : "cleanup-summary",
     timestamp: new Date().toISOString(),
     summary: [
       { label: "Checked", value: toInt(result.checked) },
-      { label: "Closed", value: toInt(result.closed) },
+      { label: isDryRun ? "WouldClose" : "Closed", value: toInt(result.closed) },
       { label: "Skipped", value: toInt(result.skipped) },
       { label: "Protected", value: toInt(result.protected) },
       { label: "Excluded", value: toInt(result.excluded) },
     ],
     sections: rows.length > 0
-      ? [{ heading: "Closed Tabs", rows }]
+      ? [{ heading: isDryRun ? "Tabs To Close" : "Closed Tabs", rows }]
       : [],
+    emptyState: isDryRun && rows.length === 0 ? "No tabs would be closed." : "",
   };
 }
 
 export function buildMemorySummaryResult(result = {}) {
+  const isDryRun = !!result.dryRun;
   const rows = Array.isArray(result.tabs)
     ? result.tabs.map((tab) => ({
         Title: toStringValue(tab.title),
@@ -175,19 +178,19 @@ export function buildMemorySummaryResult(result = {}) {
     : [];
 
   return {
-    title: "ZenTabs - Optimize Memory",
-    mode: "memory-summary",
+    title: isDryRun ? "ZenTabs - Optimize Memory Preview" : "ZenTabs - Optimize Memory",
+    mode: isDryRun ? "memory-preview" : "memory-summary",
     timestamp: new Date().toISOString(),
     summary: [
       { label: "Checked", value: toInt(result.checked ?? result.optimized) },
-      { label: "Unloaded", value: toInt(result.unloaded) },
+      { label: isDryRun ? "WouldUnload" : "Unloaded", value: toInt(result.unloaded) },
       { label: "AlreadyUnloaded", value: toInt(result.alreadyUnloaded) },
-      { label: "Protected", value: toInt(result.protected) },
       { label: "SavedMB", value: toInt(result.saved) },
     ],
     sections: rows.length > 0
-      ? [{ heading: "Unloaded Tabs", rows }]
+      ? [{ heading: isDryRun ? "Tabs To Unload" : "Unloaded Tabs", rows }]
       : [],
+    emptyState: isDryRun && rows.length === 0 ? "No tabs would be unloaded." : "",
   };
 }
 

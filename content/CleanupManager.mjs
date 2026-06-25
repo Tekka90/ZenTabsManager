@@ -207,7 +207,8 @@ export class CleanupManager {
   async optimizeMemory(options = {}) {
     const opts = {
       threshold: this.manager.preferences.memoryThreshold || 80,
-      force: options.force || false
+      force: options.force || false,
+      dryRun: options.dryRun || false
     };
     
     // Get memory info
@@ -272,6 +273,17 @@ export class CleanupManager {
         continue;
       }
 
+      // Dry-run preview: tab is eligible, but do not mutate browser state.
+      if (opts.dryRun) {
+        result.unloaded++;
+        result.saved += 50; // Estimated savings
+        result.tabs.push({
+          title: tabData.title,
+          age: tabData.lastAccessedAge.days
+        });
+        continue;
+      }
+
       // Discard/unload the tab
       try {
         if (this.manager.window.gBrowser.discardBrowser) {
@@ -304,6 +316,8 @@ export class CleanupManager {
         break;
       }
     }
+
+    result.dryRun = opts.dryRun;
     
     this.log(`Memory optimization complete: unloaded ${result.unloaded} tabs, ~${result.saved}MB saved`);
     this.manager.dispatchEvent("memory-optimized", result);

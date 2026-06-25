@@ -290,6 +290,7 @@ All approved feature specs live in the `specs/` directory. Consult the relevant 
 | `specs/SyncToBookmarksDryRun.spec.md` | Replace List All Tabs with Sync to Bookmarks dry-run preview | Implemented — 2026-06-24 |
 | `specs/SftpTabPublish.spec.md` | Export tabs to JSON + static dashboard and upload to SFTP | Implemented — 2026-06-24 |
 | `specs/KagiDashboardIntegrations.spec.md` | Dashboard Kagi Research/Assistant launchers + Kagi News highlights | Implemented — 2026-06-25 |
+| `specs/ManualCleanupOptimizerConfirm.spec.md` | Manual cleanup/optimizer preview with OK/Cancel confirmation before execution | Implemented — 2026-06-25 |
 
 ---
 

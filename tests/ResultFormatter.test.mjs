@@ -127,6 +127,23 @@ describe("buildCleanupSummaryResult", () => {
     assert.equal(result.sections?.[0]?.rows?.length, 2);
     assert.equal(result.sections?.[0]?.rows?.[0]?.Title, "A");
   });
+
+  test("renders preview labels and empty state in dry run", () => {
+    const result = buildCleanupSummaryResult({
+      dryRun: true,
+      checked: 3,
+      closed: 0,
+      skipped: 3,
+      protected: 0,
+      excluded: 0,
+      tabs: [],
+    });
+
+    assert.equal(result.title, "ZenTabs - Cleanup Preview");
+    assert.equal(result.mode, "cleanup-preview");
+    assert.equal(result.summary.find((s) => s.label === "WouldClose")?.value, 0);
+    assert.equal(result.emptyState, "No tabs would be closed.");
+  });
 });
 
 describe("buildMemorySummaryResult", () => {
@@ -146,6 +163,25 @@ describe("buildMemorySummaryResult", () => {
     assert.equal(result.summary.find((s) => s.label === "Unloaded")?.value, 3);
     assert.equal(result.summary.find((s) => s.label === "SavedMB")?.value, 150);
     assert.equal(result.sections?.[0]?.rows?.length, 2);
+  });
+
+  test("renders preview labels in dry run", () => {
+    const result = buildMemorySummaryResult({
+      dryRun: true,
+      checked: 4,
+      unloaded: 2,
+      alreadyUnloaded: 1,
+      saved: 100,
+      tabs: [
+        { title: "A", age: 9 },
+        { title: "B", age: 5 },
+      ],
+    });
+
+    assert.equal(result.title, "ZenTabs - Optimize Memory Preview");
+    assert.equal(result.mode, "memory-preview");
+    assert.equal(result.summary.find((s) => s.label === "WouldUnload")?.value, 2);
+    assert.equal(result.sections?.[0]?.heading, "Tabs To Unload");
   });
 });
 

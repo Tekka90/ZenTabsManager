@@ -456,6 +456,46 @@ describe("optimizeMemory", () => {
     assert.equal(r.unloaded, 2);
     assert.deepEqual(r.tabs.map(t => t.title), ["essential", "pinned"]);
   });
+
+  test("dryRun reports candidates without discarding tabs", async () => {
+    const old = makeTab({ url: "https://old.com", lastAccessed: Date.now() - 5 * DAY_MS });
+    const newer = makeTab({ url: "https://newer.com", lastAccessed: Date.now() - DAY_MS });
+
+    const mgr = makeManager({ tabs: [old, newer], preferences: { memoryThreshold: 1 } });
+    mgr.window.gBrowser.discardBrowser = (tab) => {
+      tab.setAttribute("discarded", "");
+      mgr.window.gBrowser._discarded.push(tab);
+    };
+    mgr.tabManager = {
+      getAllTabs: async () => [
+        {
+          tab: old,
+          title: "old",
+          url: "https://old.com",
+          type: "normal",
+          state: ["loaded"],
+          lastAccessedAge: { milliseconds: 5 * DAY_MS, days: 5 }
+        },
+        {
+          tab: newer,
+          title: "newer",
+          url: "https://newer.com",
+          type: "normal",
+          state: ["loaded"],
+          lastAccessedAge: { milliseconds: DAY_MS, days: 1 }
+        }
+      ]
+    };
+    const cm = new CleanupManager(mgr);
+    cm.getMemoryInfo = async () => ({ used: 9, total: 10, limit: 10, percentUsed: 90 });
+
+    const r = await cm.optimizeMemory({ force: true, dryRun: true });
+
+    assert.equal(r.dryRun, true);
+    assert.equal(r.unloaded, 2);
+    assert.equal(mgr.window.gBrowser._discarded.length, 0);
+    assert.deepEqual(r.tabs.map(t => t.title), ["old", "newer"]);
+  });
 });
 
 // ── checkMemoryUsage ──────────────────────────────────────────────────────
