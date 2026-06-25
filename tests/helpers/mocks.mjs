@@ -148,6 +148,7 @@ export function makeTab(overrides = {}) {
     createdAt:    overrides.createdAt    ?? Date.now(),
     userContextId: overrides.userContextId ?? 0,
     group:        overrides.group        ?? null,
+    parentNode:   overrides.parentNode   ?? {}, // For DOM validation (live tab check)
     linkedBrowser: {
       currentURI: { spec: overrides.url ?? "about:blank" },
       isRemoteBrowser: true,

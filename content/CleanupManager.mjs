@@ -261,10 +261,20 @@ export class CleanupManager {
         continue;
       }
       
+      // CRITICAL: Verify tab is still live in DOM before attempting to discard.
+      // Phantom tabs (from closed spaces or failed restores) have no parentNode.
+      const tab = tabData.tab;
+      if (!tab.parentNode || tab.hasAttribute("closing")) {
+        continue;
+      }
+      
+      // Verify linkedBrowser is valid
+      if (!tab.linkedBrowser) {
+        continue;
+      }
+      
       // Discard/unload the tab
       try {
-        const tab = tabData.tab;
-        
         // Use Firefox's built-in tab discard
         if (this.manager.window.gBrowser.discardBrowser) {
           this.manager.window.gBrowser.discardBrowser(tab);

@@ -287,6 +287,9 @@ export class TabManager {
    * Get all tabs with full metadata.
    * IMPORTANT: In Zen Browser, gBrowser.tabs only returns tabs from the ACTIVE
    * space. To get tabs across all spaces, use gZenWorkspaces.allStoredTabs.
+   * 
+   * Filters out phantom/stale tabs (e.g., from closed spaces, failed restores)
+   * by verifying each tab still has a valid parent node in the DOM.
    */
   async getAllTabs() {
     const win = this.manager.window;
@@ -296,6 +299,16 @@ export class TabManager {
 
     for (const tab of tabs) {
       if (tab.hasAttribute("zen-empty-tab")) continue;
+      
+      // CRITICAL: Filter out phantom tabs (stale DOM references from closed spaces)
+      // by checking if the tab still has a valid parent in the document tree.
+      // If parentNode is null or the tab is marked as "closing", skip it.
+      if (!tab.parentNode || tab.hasAttribute("closing")) {
+        // Remove from cache since this tab is no longer live
+        this.tabMetadataCache.delete(tab);
+        continue;
+      }
+      
       let metadata = this.tabMetadataCache.get(tab);
       if (!metadata) {
         metadata = this.cacheTabMetadata(tab);
