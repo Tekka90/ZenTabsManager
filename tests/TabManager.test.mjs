@@ -90,7 +90,7 @@ describe("getAllTabs", () => {
       url: "https://old-after-restart.com",
       lastAccessed: 0,
       createdAt: 0,
-      __SS_data: { lastAccessed: Date.now() - restartAgeMs, createdAt: Date.now() - (restartAgeMs + 86400000) },
+      __historyLastVisit: Date.now() - restartAgeMs,
     });
     const mgr = makeManager({ tabs: [tab] });
 

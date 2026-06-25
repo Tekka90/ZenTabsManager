@@ -121,8 +121,37 @@ export function makePlacesUtils() {
     _getChildren: getChildren,
   };
 
+  const historyStore = new Map();
+
+  const history = {
+    async fetch(urlOrGuid, options = {}) {
+      const key = typeof urlOrGuid === "string"
+        ? urlOrGuid
+        : urlOrGuid?.spec ?? urlOrGuid?.href ?? String(urlOrGuid);
+      const entry = historyStore.get(key);
+      if (!entry) return null;
+
+      const pageInfo = {
+        url: entry.url,
+        guid: entry.guid ?? null,
+        title: entry.title ?? "",
+      };
+
+      if (options.includeVisits) {
+        pageInfo.visits = (entry.visits ?? []).map((visit) => ({
+          date: new Date(visit.date),
+          transition: visit.transition ?? 0,
+        }));
+      }
+
+      return pageInfo;
+    },
+    _store: historyStore,
+  };
+
   const PlacesUtils = {
     bookmarks,
+    history,
     async promiseBookmarksTree(guid) {
       return buildTree(guid);
     },
@@ -149,6 +178,7 @@ export function makeTab(overrides = {}) {
     userContextId: overrides.userContextId ?? 0,
     group:        overrides.group        ?? null,
     parentNode:   overrides.parentNode   ?? {}, // For DOM validation (live tab check)
+    __historyLastVisit: overrides.__historyLastVisit ?? null,
     linkedBrowser: {
       currentURI: { spec: overrides.url ?? "about:blank" },
       isRemoteBrowser: true,
@@ -505,6 +535,19 @@ export function makeManager({
     setPreferences: async (p) => { Object.assign(defaultPrefs, p); },
     tabManager: null, // set by caller after TabManager.init()
   };
+
+  for (const tab of tabs) {
+    const url = tab.linkedBrowser?.currentURI?.spec;
+    if (!url || url === "about:blank") continue;
+    const visitDate = tab.__historyLastVisit ?? tab.lastAccessed ?? tab.createdAt;
+    if (!visitDate) continue;
+    PlacesUtils.history._store.set(url, {
+      url,
+      guid: `guid-${url}`,
+      title: tab.label ?? tab.title ?? "",
+      visits: [{ date: visitDate, transition: 0 }],
+    });
+  }
 
   return manager;
 }

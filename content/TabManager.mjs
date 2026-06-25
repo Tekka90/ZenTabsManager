@@ -33,10 +33,25 @@ export class TabManager {
     const win = this.manager.window;
     // allStoredTabs covers all spaces; fall back to gBrowser.tabs before Zen initializes
     const tabs = win.gZenWorkspaces?.allStoredTabs ?? win.gBrowser.tabs;
+    const uniqueUrls = [...new Set(
+      tabs
+        .map((tab) => this._extractTabUrl(tab))
+        .filter((url) => url && url !== "about:blank")
+    )];
+    const historyTimestamps = new Map();
+
+    await Promise.all(uniqueUrls.map(async (url) => {
+      const timestamp = await this.getHistoryLastVisitTimestamp(url);
+      if (timestamp) {
+        historyTimestamps.set(url, timestamp);
+      }
+    }));
 
     for (const tab of tabs) {
       if (tab.hasAttribute("zen-empty-tab")) continue;
-      this.cacheTabMetadata(tab);
+      this.cacheTabMetadata(tab, {
+        historyTimestamp: historyTimestamps.get(this._extractTabUrl(tab)) ?? 0,
+      });
     }
 
     if (!silent) this.log(`Cache rebuilt with ${this.tabMetadataCache.size} tabs`);
@@ -45,8 +60,8 @@ export class TabManager {
   /**
    * Cache metadata for a tab
    */
-  cacheTabMetadata(tab) {
-    const metadata = this.extractTabMetadata(tab);
+  cacheTabMetadata(tab, options = {}) {
+    const metadata = this.extractTabMetadata(tab, options);
     this.tabMetadataCache.set(tab, metadata);
     return metadata;
   }
@@ -54,7 +69,7 @@ export class TabManager {
   /**
    * Extract full metadata from a tab
    */
-  extractTabMetadata(tab) {
+  extractTabMetadata(tab, options = {}) {
     const browser = tab.linkedBrowser;
     const type = this.getTabType(tab);
     const state = this.getTabState(tab);
@@ -78,9 +93,9 @@ export class TabManager {
       muted: tab.muted,
       soundPlaying: tab.soundPlaying,
       container: tab.userContextId || null,
-      lastAccessed: this.getTabLastAccessedTimestamp(tab) || Date.now(),
-      createdAt: this.getTabCreatedTimestamp(tab) || Date.now(),
-      ...this.getTabAge(tab)
+      lastAccessed: this.getTabLastAccessedTimestamp(tab) || options.historyTimestamp || Date.now(),
+      createdAt: this.getTabCreatedTimestamp(tab) || options.historyTimestamp || Date.now(),
+      ...this.getTabAge(tab, options)
     };
   }
 
@@ -257,10 +272,11 @@ export class TabManager {
   /**
    * Get tab age information
    */
-  getTabAge(tab) {
+  getTabAge(tab, options = {}) {
     const now = Date.now();
-    const lastAccessed = this.getTabLastAccessedTimestamp(tab) || this.getTabCreatedTimestamp(tab) || now;
-    const createdAt = this.getTabCreatedTimestamp(tab) || lastAccessed;
+    const historyTimestamp = options.historyTimestamp || 0;
+    const lastAccessed = this.getTabLastAccessedTimestamp(tab) || historyTimestamp || this.getTabCreatedTimestamp(tab) || now;
+    const createdAt = this.getTabCreatedTimestamp(tab) || historyTimestamp || lastAccessed;
     
     const ageMs = now - lastAccessed;
     const createdAgeMs = now - createdAt;
@@ -348,6 +364,20 @@ export class TabManager {
     }
 
     return 0;
+  }
+
+  async getHistoryLastVisitTimestamp(url) {
+    const places = this.manager.window.PlacesUtils;
+    if (!places?.history?.fetch) return 0;
+
+    try {
+      const pageInfo = await places.history.fetch(url, { includeVisits: true });
+      const visit = pageInfo?.visits?.[0];
+      const timestamp = visit?.date instanceof Date ? visit.date.getTime() : Number(visit?.date);
+      return Number.isFinite(timestamp) ? timestamp : 0;
+    } catch (error) {
+      return 0;
+    }
   }
 
   /**
