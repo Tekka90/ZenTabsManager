@@ -257,21 +257,28 @@ export class UIManager {
     try {
       const preview = await this.manager.cleanupManager.cleanupOldTabs({ dryRun: true });
       preview.dryRun = true;
-      this.openResultsWindow(buildCleanupSummaryResult(preview));
 
-      const unit = this.manager.preferences.cleanupAgeUnit || "days";
-      const msg = `Preview complete. Execute cleanup now? This may close up to ${preview.closed} tabs older than ${this.manager.preferences.cleanupAge} ${unit}.`;
-      const confirmed = this.manager.window.Services.prompt.confirm(null, "ZenTabs Manager", msg);
-      if (!confirmed) {
-        this.showNotification("Cleanup Cancelled", "No tabs were closed");
-        return;
-      }
+      const executeCleanup = async () => {
+        this.updateResultsWindow({
+          title: "ZenTabs - Cleanup Old Tabs",
+          timestamp: new Date().toISOString(),
+          summary: [{ label: "Status", value: "Running cleanup..." }],
+          emptyState: "Applying cleanup now...",
+        });
 
-      console.log("🧹 Cleaning up old tabs...");
-      const result = await this.manager.cleanupManager.cleanupOldTabs({ dryRun: false });
-      console.log("✅ Cleanup complete:", result);
-      this.openResultsWindow(buildCleanupSummaryResult(result));
-      this.showNotification("Cleanup Complete", `Closed ${result.closed} old tabs`);
+        console.log("🧹 Cleaning up old tabs...");
+        const result = await this.manager.cleanupManager.cleanupOldTabs({ dryRun: false });
+        console.log("✅ Cleanup complete:", result);
+        this.updateResultsWindow(buildCleanupSummaryResult(result));
+        this.showNotification("Cleanup Complete", `Closed ${result.closed} old tabs`);
+      };
+
+      this.openResultsWindow(buildCleanupSummaryResult(preview), {
+        actions: [
+          { label: "Cancel", kind: "secondary", onClick: () => { this.closeResultsWindow(); this.showNotification("Cleanup Cancelled", "No tabs were closed"); } },
+          { label: "OK", kind: "primary", onClick: executeCleanup },
+        ],
+      });
     } catch (error) {
       this.openResultsWindow(buildErrorResult("ZenTabs - Cleanup Old Tabs", error));
       this.showNotification("Cleanup Failed", String(error));
@@ -281,20 +288,27 @@ export class UIManager {
   async optimizeMemory() {
     try {
       const preview = await this.manager.cleanupManager.optimizeMemory({ force: true, dryRun: true });
-      this.openResultsWindow(buildMemorySummaryResult(preview));
+      const executeOptimize = async () => {
+        this.updateResultsWindow({
+          title: "ZenTabs - Optimize Memory",
+          timestamp: new Date().toISOString(),
+          summary: [{ label: "Status", value: "Optimizing memory..." }],
+          emptyState: "Applying memory optimization now...",
+        });
 
-      const msg = `Preview complete. Execute memory optimization now? This may unload up to ${preview.unloaded} tabs.`;
-      const confirmed = this.manager.window.Services.prompt.confirm(null, "ZenTabs Manager", msg);
-      if (!confirmed) {
-        this.showNotification("Optimize Cancelled", "No tabs were unloaded");
-        return;
-      }
+        console.log("💾 Optimizing memory...");
+        const result = await this.manager.cleanupManager.optimizeMemory({ force: true, dryRun: false });
+        console.log("✅ Memory optimization complete:", result);
+        this.updateResultsWindow(buildMemorySummaryResult(result));
+        this.showNotification("Memory Optimized", `Unloaded ${result.unloaded} tabs, saved ~${result.saved}MB`);
+      };
 
-      console.log("💾 Optimizing memory...");
-      const result = await this.manager.cleanupManager.optimizeMemory({ force: true, dryRun: false });
-      console.log("✅ Memory optimization complete:", result);
-      this.openResultsWindow(buildMemorySummaryResult(result));
-      this.showNotification("Memory Optimized", `Unloaded ${result.unloaded} tabs, saved ~${result.saved}MB`);
+      this.openResultsWindow(buildMemorySummaryResult(preview), {
+        actions: [
+          { label: "Cancel", kind: "secondary", onClick: () => { this.closeResultsWindow(); this.showNotification("Optimize Cancelled", "No tabs were unloaded"); } },
+          { label: "OK", kind: "primary", onClick: executeOptimize },
+        ],
+      });
     } catch (error) {
       this.openResultsWindow(buildErrorResult("ZenTabs - Optimize Memory", error));
       this.showNotification("Optimize Failed", String(error));
@@ -311,7 +325,7 @@ export class UIManager {
     }
   }
 
-  openResultsWindow(viewModel) {
+  openResultsWindow(viewModel, options = {}) {
     const doc = this.manager.window.document;
     if (!doc) {
       console.log("[ZenTabs] Results:", viewModel);
@@ -323,6 +337,27 @@ export class UIManager {
     const dialog = doc.createElementNS("http://www.w3.org/1999/xhtml", "dialog");
     dialog.id = "zentabs-results-dialog";
     dialog.style.cssText = "padding:16px; min-width:640px; max-width:880px; width:70vw; max-height:78vh; border-radius:8px; border:1px solid #ccc; font-family:system-ui,sans-serif;";
+    this.renderResultsWindow(dialog, viewModel, options);
+
+    doc.documentElement.appendChild(dialog);
+    dialog.showModal();
+    this.resultsDialog = dialog;
+  }
+
+  updateResultsWindow(viewModel, options = {}) {
+    if (!this.resultsDialog) {
+      this.openResultsWindow(viewModel, options);
+      return;
+    }
+
+    this.renderResultsWindow(this.resultsDialog, viewModel, options);
+  }
+
+  renderResultsWindow(dialog, viewModel, options = {}) {
+    const doc = this.manager.window.document;
+    while (dialog.firstChild) {
+      dialog.removeChild(dialog.firstChild);
+    }
 
     const title = doc.createElementNS("http://www.w3.org/1999/xhtml", "h2");
     title.textContent = viewModel.title || "ZenTabs - Results";
@@ -401,17 +436,40 @@ export class UIManager {
     dialog.appendChild(body);
 
     const buttonRow = doc.createElementNS("http://www.w3.org/1999/xhtml", "div");
-    buttonRow.style.cssText = "display:flex; justify-content:flex-end; margin-top:12px;";
-    const closeBtn = doc.createElementNS("http://www.w3.org/1999/xhtml", "button");
-    closeBtn.textContent = "Close";
-    closeBtn.style.cssText = "padding:6px 16px; font-size:13px; cursor:pointer;";
-    closeBtn.addEventListener("click", () => dialog.close());
-    buttonRow.appendChild(closeBtn);
-    dialog.appendChild(buttonRow);
+    buttonRow.style.cssText = "display:flex; justify-content:flex-end; gap:8px; margin-top:12px;";
 
-    doc.documentElement.appendChild(dialog);
-    dialog.showModal();
-    this.resultsDialog = dialog;
+    const actionButtons = Array.isArray(options.actions) ? options.actions : [];
+    if (actionButtons.length > 0) {
+      for (const action of actionButtons) {
+        const button = doc.createElementNS("http://www.w3.org/1999/xhtml", "button");
+        button.textContent = action.label || "Action";
+        button.style.cssText = `padding:6px 16px; font-size:13px; cursor:pointer;${action.kind === "primary" ? " background:#1f6f78; color:#fff; border:1px solid #1f6f78;" : ""}`;
+        button.addEventListener("click", async () => {
+          const buttons = buttonRow.querySelectorAll("button");
+          buttons.forEach((el) => { el.disabled = true; });
+          try {
+            await action.onClick?.();
+          } finally {
+            if (this.resultsDialog === dialog) {
+              buttons.forEach((el) => { el.disabled = false; });
+            }
+          }
+        });
+        buttonRow.appendChild(button);
+      }
+    } else {
+      const closeBtn = doc.createElementNS("http://www.w3.org/1999/xhtml", "button");
+      closeBtn.textContent = "Close";
+      closeBtn.style.cssText = "padding:6px 16px; font-size:13px; cursor:pointer;";
+      closeBtn.addEventListener("click", () => dialog.close());
+      buttonRow.appendChild(closeBtn);
+    }
+
+    dialog.appendChild(buttonRow);
+  }
+
+  closeResultsWindow() {
+    this.resultsDialog?.close();
   }
 
   async exportToJSON() {

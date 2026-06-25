@@ -1,6 +1,6 @@
 # Specification — Manual Cleanup/Optimizer Preview + Confirm
 
-**Status:** Proposed
+**Status:** Implemented
 **Author:** GitHub Copilot
 **Date:** 2026-06-25
 
@@ -81,7 +81,7 @@ In dry-run, `unloaded` means "would unload" count.
 
 ### Manual `Cleanup Old Tabs`
 1. UI runs `cleanupOldTabs({ dryRun: true })`.
-2. Show preview window:
+2. Show preview window with OK/Cancel in the same dialog:
    - summary: checked, wouldClose, skipped, protected, excluded
    - table: tabs that would be closed
 3. Prompt confirm:
@@ -90,7 +90,7 @@ In dry-run, `unloaded` means "would unload" count.
 
 ### Manual `Optimize Memory`
 1. UI runs `optimizeMemory({ force: true, dryRun: true })`.
-2. Show preview window:
+2. Show preview window with OK/Cancel in the same dialog:
    - summary: checked, wouldUnload, alreadyUnloaded, savedMBEstimate
    - table: tabs that would be unloaded
 3. Prompt confirm:
