@@ -238,48 +238,64 @@ export class CleanupManager {
     
     for (const tabData of sortedTabs) {
       result.checked++;
-      
+
+      const tab = tabData.tab;
+      const state = Array.isArray(tabData.state) ? tabData.state : [];
+
       // Skip active tab
-      if (tabData.state.includes("active")) {
+      if (state.includes("active") || tab.selected) {
         continue;
       }
-      
+
       // Skip Essential tabs if protected
       if (tabData.type === "essential" && this.manager.preferences.keepEssentialTabs) {
         result.protected++;
         continue;
       }
-      
-      // Skip already discarded tabs
-      if (tabData.state.includes("discarded")) {
+
+      // Skip Pinned tabs if protected
+      if (tabData.type === "pinned" && this.manager.preferences.keepPinnedTabs) {
+        result.protected++;
+        continue;
+      }
+
+      // Skip tabs already unloaded/lazy-restored.
+      // In Firefox/Zen, "pending" means tab content is not currently loaded.
+      if (state.includes("discarded") || state.includes("pending") || tab.hasAttribute("discarded") || tab.hasAttribute("pending")) {
         result.alreadyUnloaded++;
         continue;
       }
-      
+
       // Skip tabs loading
-      if (tabData.state.includes("loading")) {
+      if (state.includes("loading") || tab.hasAttribute("busy")) {
         continue;
       }
-      
-      // CRITICAL: Verify tab is still live in DOM before attempting to discard.
-      // Phantom tabs (from closed spaces or failed restores) have no parentNode.
-      const tab = tabData.tab;
-      if (!tab.parentNode || tab.hasAttribute("closing")) {
+
+      // Verify tab is still live in DOM before attempting to discard.
+      if (!tab.parentNode || tab.hasAttribute("closing") || tab.isConnected === false) {
         continue;
       }
-      
+
       // Verify linkedBrowser is valid
       if (!tab.linkedBrowser) {
         continue;
       }
-      
+
       // Discard/unload the tab
       try {
-        // Use Firefox's built-in tab discard
         if (this.manager.window.gBrowser.discardBrowser) {
-          this.manager.window.gBrowser.discardBrowser(tab);
+          const discardResult = this.manager.window.gBrowser.discardBrowser(tab);
+          if (discardResult && typeof discardResult.then === "function") {
+            await discardResult;
+          }
+
+          const nowDiscarded = tab.hasAttribute("discarded") || tab.hasAttribute("pending");
+          if (!nowDiscarded) {
+            continue;
+          }
+
           result.unloaded++;
-          result.saved += 50; // Estimate 50MB saved per tab
+          result.saved += 50; // Estimated savings
           this.unloadedTabs.add(tab);
           result.tabs.push({
             title: tabData.title,
@@ -290,7 +306,7 @@ export class CleanupManager {
       } catch (error) {
         console.error("Error unloading tab:", error);
       }
-      
+
       // Stop if we've freed enough memory
       if (result.unloaded >= 20) {
         this.log("Unloaded 20 tabs, stopping optimization");

@@ -361,6 +361,46 @@ describe("optimizeMemory", () => {
     assert.ok(r.unloaded >= 1);
     assert.ok(mgr.window.gBrowser._discarded.length >= 1);
   });
+
+  test("does not count pending tabs as newly unloaded", async () => {
+    const pending = makeTab({ url: "https://pending.com", attrs: { pending: "" }, lastAccessed: Date.now() - 20 * DAY_MS });
+    const loaded = makeTab({ url: "https://loaded.com", lastAccessed: Date.now() - DAY_MS });
+
+    const mgr = makeManager({ tabs: [pending, loaded], preferences: { memoryThreshold: 1 } });
+    mgr.window.gBrowser.discardBrowser = (tab) => {
+      tab.setAttribute("discarded", "");
+      mgr.window.gBrowser._discarded.push(tab);
+    };
+    mgr.tabManager = {
+      getAllTabs: async () => [
+        {
+          tab: pending,
+          title: "pending",
+          url: "https://pending.com",
+          type: "normal",
+          state: ["pending"],
+          lastAccessedAge: { milliseconds: 20 * DAY_MS, days: 20 }
+        },
+        {
+          tab: loaded,
+          title: "loaded",
+          url: "https://loaded.com",
+          type: "normal",
+          state: ["loaded"],
+          lastAccessedAge: { milliseconds: DAY_MS, days: 1 }
+        }
+      ]
+    };
+
+    const cm = new CleanupManager(mgr);
+    cm.getMemoryInfo = async () => ({ used: 9, total: 10, limit: 10, percentUsed: 90 });
+
+    const r = await cm.optimizeMemory({ force: true });
+
+    assert.equal(r.alreadyUnloaded, 1);
+    assert.equal(r.unloaded, 1);
+    assert.deepEqual(r.tabs.map(t => t.title), ["loaded"]);
+  });
 });
 
 // ── checkMemoryUsage ──────────────────────────────────────────────────────
