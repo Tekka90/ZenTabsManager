@@ -143,7 +143,7 @@ export class CleanupManager {
   /**
    * Unload tabs that haven't been touched for longer than autoUnloadDelay seconds.
    * Works the same as memory optimisation (discard, not close) but is time-driven.
-   * Respects keepEssentialTabs / keepPinnedTabs and never unloads the active tab.
+   * Never unloads essential/pinned tabs, and never unloads the active tab.
    */
   async unloadStaleTabs() {
     if (!this.manager.preferences.autoUnloadEnabled) return;
@@ -161,8 +161,8 @@ export class CleanupManager {
       if (tab.hasAttribute("discarded"))   continue;
       if (tab.hasAttribute("busy"))        continue;
       if (tab.hasAttribute("pending"))     continue;
-      if (tabData.type === "essential" && this.manager.preferences.keepEssentialTabs) continue;
-      if (tabData.type === "pinned"    && this.manager.preferences.keepPinnedTabs)    continue;
+      if (tabData.type === "essential") continue;
+      if (tabData.type === "pinned")    continue;
 
       if (tabData.lastAccessedAge.milliseconds < delayMs) continue;
 
@@ -247,17 +247,8 @@ export class CleanupManager {
         continue;
       }
 
-      // Skip Essential tabs if protected
-      if (tabData.type === "essential" && this.manager.preferences.keepEssentialTabs) {
-        result.protected++;
-        continue;
-      }
-
-      // Skip Pinned tabs if protected
-      if (tabData.type === "pinned" && this.manager.preferences.keepPinnedTabs) {
-        result.protected++;
-        continue;
-      }
+      // Memory optimisation is intentionally aggressive: essential/pinned tabs
+      // are eligible for discard when memory pressure requires it.
 
       // Skip tabs already unloaded/lazy-restored.
       // In Firefox/Zen, "pending" means tab content is not currently loaded.

@@ -242,6 +242,14 @@ describe("unloadStaleTabs", () => {
     assert.equal(mgr.window.gBrowser._discarded.length, 0);
   });
 
+  test("protects essential tab even when keepEssentialTabs=false", async () => {
+    const { cm, mgr } = makeUnloadCleanup([
+      { url: "https://ess.com", lastAccessed: Date.now() - 7200000, attrs: { "zen-essential": "" } },
+    ], { keepEssentialTabs: false });
+    await cm.unloadStaleTabs();
+    assert.equal(mgr.window.gBrowser._discarded.length, 0);
+  });
+
   test("does nothing when paused", async () => {
     const { cm, mgr } = makeUnloadCleanup(
       [{ url: "https://old.com", lastAccessed: Date.now() - 7200000 }],
@@ -298,6 +306,14 @@ describe("unloadStaleTabs", () => {
     const { cm, mgr } = makeUnloadCleanup([
       { url: "https://pin.com", pinned: true, lastAccessed: Date.now() - 7200000 },
     ], { keepPinnedTabs: true });
+    await cm.unloadStaleTabs();
+    assert.equal(mgr.window.gBrowser._discarded.length, 0);
+  });
+
+  test("protects pinned tab even when keepPinnedTabs=false", async () => {
+    const { cm, mgr } = makeUnloadCleanup([
+      { url: "https://pin.com", pinned: true, lastAccessed: Date.now() - 7200000 },
+    ], { keepPinnedTabs: false });
     await cm.unloadStaleTabs();
     assert.equal(mgr.window.gBrowser._discarded.length, 0);
   });
@@ -400,6 +416,45 @@ describe("optimizeMemory", () => {
     assert.equal(r.alreadyUnloaded, 1);
     assert.equal(r.unloaded, 1);
     assert.deepEqual(r.tabs.map(t => t.title), ["loaded"]);
+  });
+
+  test("optimizer can discard essential and pinned tabs", async () => {
+    const essential = makeTab({ url: "https://essential.com", attrs: { "zen-essential": "" }, lastAccessed: Date.now() - 3 * DAY_MS });
+    const pinned = makeTab({ url: "https://pinned.com", pinned: true, lastAccessed: Date.now() - 2 * DAY_MS });
+
+    const mgr = makeManager({ tabs: [essential, pinned], preferences: { memoryThreshold: 1, keepEssentialTabs: true, keepPinnedTabs: true } });
+    mgr.window.gBrowser.discardBrowser = (tab) => {
+      tab.setAttribute("discarded", "");
+      mgr.window.gBrowser._discarded.push(tab);
+    };
+    mgr.tabManager = {
+      getAllTabs: async () => [
+        {
+          tab: essential,
+          title: "essential",
+          url: "https://essential.com",
+          type: "essential",
+          state: ["loaded"],
+          lastAccessedAge: { milliseconds: 3 * DAY_MS, days: 3 }
+        },
+        {
+          tab: pinned,
+          title: "pinned",
+          url: "https://pinned.com",
+          type: "pinned",
+          state: ["loaded"],
+          lastAccessedAge: { milliseconds: 2 * DAY_MS, days: 2 }
+        }
+      ]
+    };
+
+    const cm = new CleanupManager(mgr);
+    cm.getMemoryInfo = async () => ({ used: 9, total: 10, limit: 10, percentUsed: 90 });
+
+    const r = await cm.optimizeMemory({ force: true });
+
+    assert.equal(r.unloaded, 2);
+    assert.deepEqual(r.tabs.map(t => t.title), ["essential", "pinned"]);
   });
 });
 

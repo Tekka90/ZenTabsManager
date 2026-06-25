@@ -69,7 +69,7 @@ ZenTabsManager/
 - **`ZenTabsManager`** (`zen.sys.mjs`): Central coordinator. Owns preferences, event bus (`EventTarget`), window reference, and manager instances. Background intervals live here.
 - **`TabManager`** (`content/TabManager.mjs`): Maintains an in-memory `Map<tab, metadata>` cache. Extracts type/state/workspace/folder/URL from each tab. Provides `getAllTabs()`, `getTabsFiltered(filters)`, `getStatistics()`.
 - **`SimpleBookmarkSyncManager`** (`content/SimpleBookmarkSyncManager.mjs`): Idempotent overwrite-based bookmark sync. Stores bookmarks under `ZenTabs/<SpaceName>/` with optional space metadata annotations. Supports `syncTabsToBookmarks()` (tabs → bookmarks) and `syncBookmarksToTabs()` (bookmarks → tabs, with optional dry-run). Uses pool-based matching. No manifest required.
-- **`CleanupManager`** (`content/CleanupManager.mjs`): Age-based tab closure and memory optimization. Also supports **auto-unload of idle tabs** (`unloadStaleTabs()`) based on `autoUnloadDelay`. Memory reporting uses `ChromeUtils.requestProcInfo()` and `Services.sysinfo`. Respects `keepEssentialTabs` and `keepPinnedTabs` preferences.
+- **`CleanupManager`** (`content/CleanupManager.mjs`): Age-based tab closure and memory optimization. Also supports **auto-unload of idle tabs** (`unloadStaleTabs()`) based on `autoUnloadDelay`. Memory reporting uses `ChromeUtils.requestProcInfo()` and `Services.sysinfo`. Automatic cleanup/auto-unload never touches essential or pinned tabs. Memory optimization may discard essential/pinned tabs when under memory pressure.
 - **`TabPublishManager`** (`content/TabPublishManager.mjs`): Builds `tabs.json` and a static `index.html` dashboard, writes them to profile temp, and uploads both files to an SFTP destination using the system `sftp` CLI.
 - **`UIManager`** (`content/UI.mjs`): Creates a XUL `toolbarbutton` in `#nav-bar` with a `menupopup`. Registers keyboard shortcuts via `document.addEventListener("keydown", ...)`.
 - **`ResultFormatter`** (`content/ResultFormatter.mjs`): Builds normalized, UI-friendly view models for action result dialogs (tab list, sync summaries, restore dry-run plan, cleanup/memory summaries, statistics, and errors).
@@ -196,8 +196,8 @@ Stored under `Services.prefs.getBranch("zentabs.")` as a JSON string in `"prefer
 | `memoryThreshold` | `80` | Memory usage % at which optimization triggers |
 | `autoUnloadEnabled` | `false` | Enable time-based idle tab unloading |
 | `autoUnloadDelay` | `3600` | Seconds of inactivity before a tab is unloaded |
-| `keepEssentialTabs` | `true` | Never close/unload essential tabs |
-| `keepPinnedTabs` | `true` | Never close/unload pinned tabs |
+| `keepEssentialTabs` | `true` | Never close essential tabs during age-based cleanup |
+| `keepPinnedTabs` | `true` | Never close pinned tabs during age-based cleanup |
 | `showToolbarButton` | `true` | Show the toolbar button in `#nav-bar` |
 | `debugMode` | `false` | Verbose logging to browser console |
 | `publishSftpHost` | `""` | SFTP host used for dashboard upload |
