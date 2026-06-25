@@ -52,220 +52,16 @@ export class TabPublishManager {
       version: 1,
       generatedAt: new Date().toISOString(),
       source: "ZenTabsManager",
+      title: this.manager.preferences?.publishSftpDashboardTitle || "ZenTabs Dashboard",
       stats,
       tabs: list,
     };
   }
-
-  buildDashboardHtml(title = "ZenTabs Dashboard") {
-    const safeTitle = String(title || "ZenTabs Dashboard").replace(/[<>]/g, "");
-    return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${safeTitle}</title>
-  <style>
-    :root {
-      --bg: #f6f4ee;
-      --panel: #ffffff;
-      --ink: #202124;
-      --muted: #6b7280;
-      --line: #e8e2d4;
-      --type-essential: #f7d794;
-      --type-pinned: #cde7f0;
-      --type-normal: #e5e7eb;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Avenir Next", "Segoe UI", sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(1000px 400px at 100% -10%, #e9f6f8, transparent),
-        radial-gradient(700px 300px at -10% 20%, #fff3df, transparent),
-        var(--bg);
-    }
-    .wrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
-    .hero {
-      border: 1px solid var(--line);
-      background: linear-gradient(135deg, #ffffff, #faf7ef);
-      border-radius: 18px;
-      padding: 20px;
-      box-shadow: 0 12px 30px rgba(31,111,120,0.09);
-      margin-bottom: 16px;
-    }
-    h1 { margin: 0 0 6px; font-size: 28px; letter-spacing: 0.2px; }
-    .muted { color: var(--muted); font-size: 13px; }
-    .cards {
-      margin-top: 14px;
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-      gap: 10px;
-    }
-    .card {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px;
-    }
-    .card .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
-    .card .v { font-size: 24px; margin-top: 4px; }
-    .panel {
-      border: 1px solid var(--line);
-      background: var(--panel);
-      border-radius: 14px;
-      overflow: hidden;
-    }
-    .toolbar {
-      padding: 10px;
-      border-bottom: 1px solid var(--line);
-      background: #fffdf8;
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    input, select {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 8px 10px;
-      font-size: 13px;
-      background: #fff;
-    }
-    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    th, td {
-      text-align: left;
-      border-bottom: 1px solid var(--line);
-      padding: 8px;
-      font-size: 12px;
-      vertical-align: top;
-      overflow-wrap: anywhere;
-    }
-    th { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
-    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; }
-    .essential { background: var(--type-essential); }
-    .pinned { background: var(--type-pinned); }
-    .normal { background: var(--type-normal); }
-    @media (max-width: 700px) {
-      h1 { font-size: 22px; }
-      th:nth-child(5), td:nth-child(5) { display: none; }
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <section class="hero">
-      <h1>${safeTitle}</h1>
-      <div class="muted" id="generated"></div>
-      <div class="cards" id="cards"></div>
-    </section>
-
-    <section class="panel">
-      <div class="toolbar">
-        <input id="q" placeholder="Search title/url/folder" />
-        <select id="typeFilter">
-          <option value="">All types</option>
-          <option value="essential">Essential</option>
-          <option value="pinned">Pinned</option>
-          <option value="normal">Normal</option>
-        </select>
-        <select id="spaceFilter"><option value="">All spaces</option></select>
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Type</th>
-            <th>Title</th>
-            <th>Space</th>
-            <th>Folder</th>
-            <th>URL</th>
-          </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-      </table>
-    </section>
-  </div>
-
-  <script>
-    const el = {
-      generated: document.getElementById("generated"),
-      cards: document.getElementById("cards"),
-      q: document.getElementById("q"),
-      typeFilter: document.getElementById("typeFilter"),
-      spaceFilter: document.getElementById("spaceFilter"),
-      rows: document.getElementById("rows"),
-    };
-
-    let tabs = [];
-
-    function drawCards(stats) {
-      const entries = [
-        ["Total", stats.total],
-        ["Essential", stats.essential],
-        ["Pinned", stats.pinned],
-        ["Normal", stats.normal],
-        ["Spaces", stats.spaces],
-      ];
-      el.cards.innerHTML = entries.map(([k, v]) =>
-        '<div class="card"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'
-      ).join("");
-    }
-
-    function normalize(s) { return String(s ?? "").toLowerCase(); }
-
-    function renderRows() {
-      const q = normalize(el.q.value);
-      const t = el.typeFilter.value;
-      const s = el.spaceFilter.value;
-      const filtered = tabs.filter(tab => {
-        if (t && tab.type !== t) return false;
-        if (s && tab.space !== s) return false;
-        if (q) {
-          const text = String(tab.title || "") + " " + String(tab.url || "") + " " + String(tab.folder || "");
-          const lowered = text.toLowerCase();
-          if (!lowered.includes(q)) return false;
-        }
-        return true;
-      });
-
-      el.rows.innerHTML = filtered.map(tab => {
-        return '<tr>' +
-          '<td><span class="pill ' + (tab.type || "normal") + '">' + (tab.type || "normal") + '</span></td>' +
-          '<td>' + (tab.title || "") + '</td>' +
-          '<td>' + (tab.space || "") + '</td>' +
-          '<td>' + (tab.folder || "") + '</td>' +
-          '<td><a href="' + (tab.url || "about:blank") + '" target="_blank" rel="noreferrer">' + (tab.url || "about:blank") + '</a></td>' +
-        '</tr>';
-      }).join("");
-    }
-
-    async function init() {
-      const res = await fetch("./tabs.json", { cache: "no-store" });
-      const data = await res.json();
-      tabs = data.tabs || [];
-      el.generated.textContent = "Generated: " + new Date(data.generatedAt).toLocaleString();
-      drawCards(data.stats || { total: 0, essential: 0, pinned: 0, normal: 0, spaces: 0 });
-
-      const spaces = [...new Set(tabs.map(t => t.space).filter(Boolean))].sort();
-      for (const space of spaces) {
-        const opt = document.createElement("option");
-        opt.value = space;
-        opt.textContent = space;
-        el.spaceFilter.appendChild(opt);
-      }
-
-      el.q.addEventListener("input", renderRows);
-      el.typeFilter.addEventListener("change", renderRows);
-      el.spaceFilter.addEventListener("change", renderRows);
-      renderRows();
-    }
-
-    init().catch(err => {
-      el.rows.innerHTML = '<tr><td colspan="5">Failed to load tabs.json: ' + String(err) + '</td></tr>';
-    });
-  </script>
-</body>
-</html>`;
+  async _readDashboardHtml() {
+    const io = globalThis.IOUtils;
+    if (!io) throw new Error("IOUtils not available");
+    const dir = new URL(".", import.meta.url).pathname;
+    return io.readUTF8(dir + "dashboard.html");
   }
 
   _quoteForBatch(value) {
@@ -353,7 +149,7 @@ export class TabPublishManager {
     try {
       const tabs = await this.manager.tabManager.getAllTabs();
       const payload = this.buildTabsPayload(tabs);
-      const html = this.buildDashboardHtml(cfg.dashboardTitle);
+      const html = await this._readDashboardHtml();
 
       const baseDir = PathUtils.join(PathUtils.profileDir, "zentabs-publish");
       await IOUtils.makeDirectory(baseDir);

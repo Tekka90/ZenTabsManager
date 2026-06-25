@@ -264,10 +264,6 @@ export class CleanupManager {
       // Discard/unload the tab
       try {
         const tab = tabData.tab;
-        if (tab.linkedBrowser && !tab.linkedBrowser.isRemoteBrowser) {
-          // Mark for unload
-          tab.setAttribute("pending", "true");
-        }
         
         // Use Firefox's built-in tab discard
         if (this.manager.window.gBrowser.discardBrowser) {

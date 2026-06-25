@@ -1,6 +1,6 @@
 # 🚀 ZenTabs Manager - Full Sine Mod
 
-**Advanced tab management for Zen Browser** with bookmark sync, memory optimization, automatic cleanup, and intelligent tab organization.
+**Advanced tab management for Zen Browser** with bookmark sync, memory optimization, automatic cleanup, intelligent tab organization, and SFTP dashboard publishing.
 
 > ⚠️ **IMPORTANT:** This mod requires JavaScript. You MUST enable **"External marketplace"** in Sine settings or the mod won't work! See [Installation Guide](INSTALL.md) for details.
 
@@ -31,6 +31,12 @@
 - **Threshold-Based**: Triggers at configurable memory percentage
 - **Least Recently Used**: Unloads oldest unused tabs first
 - **Background Monitoring**: Checks memory every 5 minutes
+
+### 🌐 SFTP Dashboard Publish
+- **One-click publish**: Export open tabs as `tabs.json` and upload to SFTP
+- **Static dashboard page**: Uploads `index.html` that renders the JSON with client-side JS
+- **Hierarchical view**: Tabs are grouped by Space, folders, and subfolders
+- **Settings-gated UI**: Publish action appears only when required SFTP fields are configured
 
 ### 🎨 User Interface
 - **Toolbar Button**: Quick access dropdown menu
@@ -74,19 +80,19 @@ Copy the repo folder into your Zen profile's `chrome/sine-mods/` directory and r
 ### Toolbar Button
 
 Click the **ZenTabs** button in your toolbar to access:
-- List All Tabs
 - Sync to Bookmarks
+- Sync to Bookmarks (dry run)
 - Restore from Bookmarks
 - Restore from Bookmarks (dry run)
 - Cleanup Old Tabs
 - Optimize Memory
 - Show Statistics
 - Export to JSON
+- Publish Tabs Dashboard
 - Settings
 
 ### Keyboard Shortcuts
 
-- **`Cmd+Shift+L`**: List all tabs in console (with full metadata)
 - **`Cmd+Shift+B`**: Sync tabs to bookmarks
 - **`Cmd+Shift+M`**: Optimize memory (unload inactive tabs)
 - **`Cmd+Shift+K`**: Run cleanup (close old tabs)
@@ -103,6 +109,7 @@ const pinnedTabs = await ZenTabsAPI.getTabsFiltered({ type: 'pinned' });
 
 // Sync operations
 await ZenTabsAPI.syncToBookmarks();
+await ZenTabsAPI.syncToBookmarks({ dryRun: true });
 await ZenTabsAPI.syncFromBookmarks();
 await ZenTabsAPI.syncFromBookmarks({ dryRun: true });
 
@@ -121,6 +128,9 @@ console.log(stats);
 
 // Export
 const json = await ZenTabsAPI.exportToJSON();
+
+// Publish tabs.json + dashboard index.html to SFTP
+await ZenTabsAPI.publishTabsToSftp();
 ```
 
 ### Preferences
@@ -132,10 +142,11 @@ To change settings:
 
 ```javascript
 await ZenTabsAPI.setPreferences({
-  syncEnabled: true,
-  syncDirection: 'bidirectional',
   cleanupAge: 14,
-  memoryThreshold: 75
+  memoryThreshold: 75,
+  publishSftpHost: 'example.com',
+  publishSftpUser: 'alice',
+  publishSftpRemoteDir: '/var/www/tabs'
 });
 ```
 
@@ -159,6 +170,12 @@ All preferences with defaults:
 | `keepPinnedTabs` | `true` | Never close/unload Pinned tabs |
 | `showToolbarButton` | `true` | Show toolbar button in `#nav-bar` |
 | `debugMode` | `false` | Enable verbose debug logging |
+| `publishSftpHost` | `""` | SFTP host used for dashboard upload |
+| `publishSftpPort` | `22` | SFTP port |
+| `publishSftpUser` | `""` | SFTP username |
+| `publishSftpRemoteDir` | `""` | Remote directory where `tabs.json` and `index.html` are uploaded |
+| `publishSftpPrivateKeyPath` | `""` | Optional SSH private key path for SFTP authentication |
+| `publishSftpDashboardTitle` | `"ZenTabs Dashboard"` | Dashboard title stored in `tabs.json` and rendered by `index.html` |
 
 ## 📂 Project Structure
 
@@ -172,6 +189,8 @@ zentabs-manager/
 │   ├── TabManager.mjs      # Tab enumeration, metadata cache, filtering
 │   ├── SimpleBookmarkSyncManager.mjs  # Idempotent bookmark sync (tabs↔bookmarks)
 │   ├── CleanupManager.mjs  # Age-based cleanup and memory optimization
+│   ├── TabPublishManager.mjs  # JSON + dashboard generation and SFTP publish
+│   ├── dashboard.html     # Static dashboard template served with tabs.json
 │   └── UI.mjs              # Toolbar button (XUL), dropdown menu, keyboard shortcuts
 ├── README.md               # This file
 └── INSTALL.md              # Installation guide
@@ -187,8 +206,9 @@ The mod is built with a clean separation of concerns:
 2. **TabManager**: Core tab operations and metadata extraction
 3. **SimpleBookmarkSyncManager**: Idempotent overwrite-based bookmark sync (supports duplicate URLs)
 4. **CleanupManager**: Age-based cleanup, memory optimization, and idle tab unloading
-5. **UIManager**: User interface components
-6. **zen.api.mjs**: Public API (`ZenTabsAPI`) exposed on the chrome window
+5. **TabPublishManager**: Builds tabs JSON, stages static dashboard, uploads both via SFTP
+6. **UIManager**: User interface components
+7. **zen.api.mjs**: Public API (`ZenTabsAPI`) exposed on the chrome window
 
 ### Event System
 

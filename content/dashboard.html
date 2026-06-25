@@ -1,0 +1,724 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ZenTabs Dashboard</title>
+  <style>
+    :root {
+      --bg: #f0ede6;
+      --panel: #ffffff;
+      --ink: #1c1c1e;
+      --muted: #6b7280;
+      --line: #e2ddd4;
+      --space-bg: #1f6f78;
+      --space-fg: #ffffff;
+      --folder-bg: #f5f2eb;
+      --folder-border: #d8d0c2;
+      --tab-hover: #f9f7f3;
+      --type-essential: #f5c842;
+      --type-pinned: #60aee8;
+      --type-normal: #9ca3af;
+      --highlight: #ffe082;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      min-height: 100vh;
+    }
+    .wrap {
+      width: 100%;
+      max-width: none;
+      margin: 0;
+      padding: 28px clamp(14px, 2vw, 30px) 48px;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      background: linear-gradient(135deg, #1f6f78 0%, #155a62 100%);
+      border-radius: 20px;
+      padding: 24px 28px;
+      color: #fff;
+      margin-bottom: 20px;
+      box-shadow: 0 16px 36px rgba(31,111,120,0.22);
+    }
+    .hero h1 { margin: 0 0 4px; font-size: 26px; font-weight: 700; letter-spacing: 0.1px; }
+    .hero .sub { font-size: 13px; opacity: 0.75; }
+    .cards {
+      margin-top: 16px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .card {
+      background: rgba(255,255,255,0.15);
+      border: 1px solid rgba(255,255,255,0.22);
+      border-radius: 12px;
+      padding: 8px 14px;
+      min-width: 90px;
+    }
+    .card .k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; opacity: 0.8; }
+    .card .v { font-size: 22px; font-weight: 700; margin-top: 2px; }
+
+    /* ── Toolbar ── */
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+      align-items: center;
+    }
+    .toolbar input {
+      flex: 1;
+      min-width: 200px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px 12px;
+      font-size: 13px;
+      background: var(--panel);
+      outline: none;
+    }
+    .toolbar input:focus { border-color: var(--space-bg); box-shadow: 0 0 0 2px rgba(31,111,120,0.15); }
+    .toolbar select {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px 10px;
+      font-size: 13px;
+      background: var(--panel);
+    }
+    .ctrl-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .ctrl-row button {
+      font-size: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 5px 12px;
+      cursor: pointer;
+      color: var(--muted);
+    }
+    .ctrl-row button:hover { background: var(--folder-bg); color: var(--ink); }
+
+    /* ── Kagi panels ── */
+    .kagi-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .kagi-panel {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .kagi-panel.quick-launch {
+      display: flex;
+      flex-direction: column;
+    }
+    .kagi-panel h2 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      font-weight: 700;
+      color: #2c2c2f;
+    }
+    .kagi-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+      align-items: center;
+    }
+    .kagi-row:last-child { margin-bottom: 0; }
+    .kagi-row input {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      background: #fff;
+    }
+    #kagiAssistantQuery {
+      width: 100%;
+      flex: 1 1 auto;
+    }
+    .kagi-row.assistant-row {
+      flex: 1;
+      min-height: 0;
+      align-items: stretch;
+    }
+    .kagi-row.assistant-row input {
+      height: 100%;
+      min-height: 36px;
+    }
+    .kagi-row button {
+      border: 1px solid #1f6f78;
+      background: #1f6f78;
+      color: #fff;
+      border-radius: 8px;
+      padding: 7px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .kagi-row button:hover { background: #185d64; border-color: #185d64; }
+    .kagi-news-list {
+      margin: 0;
+      padding-left: 18px;
+      color: #3a3530;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .kagi-news-list li { margin-bottom: 5px; }
+    .kagi-news-list a { color: #1f6f78; text-decoration: none; }
+    .kagi-news-list a:hover { text-decoration: underline; }
+    .kagi-news-fallback { color: var(--muted); font-size: 12px; }
+    .kagi-news-tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .kagi-news-tab {
+      border: 1px solid var(--line);
+      background: #f8f6f1;
+      color: #4b5563;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .kagi-news-tab.active {
+      border-color: #1f6f78;
+      background: #1f6f78;
+      color: #fff;
+    }
+
+    /* ── Tree ── */
+    #tree { display: flex; flex-direction: column; gap: 12px; }
+
+    /* Space block */
+    .space-block {}
+    .space-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--space-bg);
+      color: var(--space-fg);
+      border-radius: 14px 14px 0 0;
+      padding: 10px 16px;
+      cursor: pointer;
+      user-select: none;
+      border: none;
+      width: 100%;
+      text-align: left;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+    }
+    .space-block.collapsed .space-header { border-radius: 14px; }
+    .space-header .caret { font-size: 10px; opacity: 0.7; transition: transform 0.18s; }
+    .space-block.collapsed .space-header .caret { transform: rotate(-90deg); }
+    .space-header .badge {
+      margin-left: auto;
+      font-size: 11px;
+      background: rgba(255,255,255,0.2);
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-weight: 500;
+    }
+    .space-body {
+      border: 1px solid var(--line);
+      border-top: none;
+      border-radius: 0 0 14px 14px;
+      overflow: hidden;
+      background: var(--panel);
+    }
+    .space-block.collapsed .space-body { display: none; }
+
+    /* Folder block */
+    .folder-block {}
+    .folder-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 14px;
+      background: var(--folder-bg);
+      border-bottom: 1px solid var(--folder-border);
+      cursor: pointer;
+      user-select: none;
+      font-size: 13px;
+      font-weight: 600;
+      color: #3a3530;
+    }
+    .folder-header .caret { font-size: 9px; color: var(--muted); transition: transform 0.15s; }
+    .folder-block.collapsed .folder-header .caret { transform: rotate(-90deg); }
+    .folder-header .fbadge { margin-left: auto; font-size: 11px; color: var(--muted); font-weight: 400; }
+    .folder-body { }
+    .folder-block.collapsed .folder-body { display: none; }
+
+    /* Nested folders: indent left border */
+    .folder-block.nested > .folder-header { padding-left: 30px; background: #faf8f4; }
+    .folder-block.nested2 > .folder-header { padding-left: 46px; background: #f7f5f0; }
+
+    /* Tab row */
+    .tab-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 8px 14px;
+      border-bottom: 1px solid #f0ece4;
+      transition: background 0.1s;
+    }
+    .tab-row:last-child { border-bottom: none; }
+    .tab-row:hover { background: var(--tab-hover); }
+    .tab-row.indent1 { padding-left: 30px; }
+    .tab-row.indent2 { padding-left: 46px; }
+    .tab-row.indent3 { padding-left: 62px; }
+    .tab-icon { width: 16px; height: 16px; flex-shrink: 0; margin-top: 2px; opacity: 0.6; font-size: 14px; line-height: 1; }
+    .tab-main { flex: 1; min-width: 0; }
+    .tab-title {
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tab-title a { color: var(--ink); text-decoration: none; }
+    .tab-title a:hover { color: var(--space-bg); text-decoration: underline; }
+    .tab-url {
+      font-size: 11px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 1px;
+    }
+    .pill {
+      flex-shrink: 0;
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      margin-top: 2px;
+    }
+    .essential { background: var(--type-essential); color: #5a4100; }
+    .pinned    { background: var(--type-pinned);    color: #0a3d6b; }
+    .normal    { background: #eceae4;               color: var(--muted); }
+
+    mark { background: var(--highlight); border-radius: 3px; padding: 0 2px; }
+
+    .empty { padding: 24px; text-align: center; color: var(--muted); font-size: 14px; }
+
+    @media (max-width: 640px) {
+      .wrap { padding: 14px; }
+      .hero { padding: 16px; border-radius: 14px; }
+      .hero h1 { font-size: 20px; }
+      .kagi-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1 id="pageTitle">ZenTabs Dashboard</h1>
+      <div class="sub" id="generated"></div>
+      <div class="cards" id="cards"></div>
+    </section>
+
+    <section class="kagi-grid">
+      <section class="kagi-panel quick-launch">
+        <h2>Kagi Quick Launch</h2>
+        <div class="kagi-row">
+          <input id="kagiResearchQuery" type="search" placeholder="Kagi Research query..." autocomplete="off" />
+          <button id="kagiResearchGo">Research</button>
+        </div>
+        <div class="kagi-row assistant-row">
+          <input id="kagiAssistantQuery" type="search" placeholder="Kagi Assistant prompt..." autocomplete="off" />
+          <button id="kagiAssistantGo">Assistant</button>
+        </div>
+      </section>
+      <section class="kagi-panel">
+        <h2>Kagi News Highlights</h2>
+        <div class="kagi-news-tabs" id="kagiNewsTabs">
+          <button class="kagi-news-tab active" data-feed="world">World</button>
+          <button class="kagi-news-tab" data-feed="tech">Tech</button>
+          <button class="kagi-news-tab" data-feed="science">Science</button>
+          <button class="kagi-news-tab" data-feed="sports">Sports</button>
+          <button class="kagi-news-tab" data-feed="gaming">Gaming</button>
+        </div>
+        <ul class="kagi-news-list" id="kagiNewsList">
+          <li>Loading highlights...</li>
+        </ul>
+      </section>
+    </section>
+
+    <div class="toolbar">
+      <input id="q" type="search" placeholder="Search tabs..." autocomplete="off" />
+      <select id="typeFilter">
+        <option value="">All types</option>
+        <option value="essential">Essential</option>
+        <option value="pinned">Pinned</option>
+        <option value="normal">Normal</option>
+      </select>
+    </div>
+
+    <div class="ctrl-row">
+      <button id="expandAll">Expand all</button>
+      <button id="collapseAll">Collapse all</button>
+    </div>
+
+    <div id="tree"></div>
+  </div>
+
+  <script>
+    var allTabs = [];
+
+    /* ── helpers ── */
+    function esc(s) {
+      return String(s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    }
+
+    function hi(s, q) {
+      if (!q) return esc(s);
+      var safe = esc(s);
+      var safeQ = esc(q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return safe.replace(new RegExp("(" + safeQ + ")", "gi"), "<mark>$1</mark>");
+    }
+
+    function typeIcon(type) {
+      if (type === "essential") return "★";
+      if (type === "pinned")    return "📌";
+      return "·";
+    }
+
+    function buildKagiResearchUrl(query) {
+      return "https://kagi.com/search?q=" + encodeURIComponent(query) + "&source=zentabs-dashboard";
+    }
+
+    function buildKagiAssistantUrl(query) {
+      var trimmed = String(query || "").trim();
+      if (!trimmed) return "https://kagi.com/assistant";
+      return "https://kagi.com/assistant?q=" + encodeURIComponent(trimmed) + "&source=zentabs-dashboard";
+    }
+
+    function goKagiResearch() {
+      var query = document.getElementById("kagiResearchQuery").value.trim();
+      if (!query) return;
+      window.location.href = buildKagiResearchUrl(query);
+    }
+
+    function goKagiAssistant() {
+      var query = document.getElementById("kagiAssistantQuery").value;
+      window.location.href = buildKagiAssistantUrl(query);
+    }
+
+    var kagiNewsFeeds = {
+      world: "https://news.kagi.com/world.xml",
+      tech: "https://news.kagi.com/tech.xml",
+      science: "https://news.kagi.com/science.xml",
+      sports: "https://news.kagi.com/sports.xml",
+      gaming: "https://news.kagi.com/gaming.xml"
+    };
+    var kagiNewsItemsByFeed = {};
+    var activeKagiNewsFeed = "world";
+
+    function parseKagiPubDateMs(value) {
+      var ms = Date.parse(value || "");
+      return Number.isFinite(ms) ? ms : 0;
+    }
+
+    function parseKagiNewsRss(xmlText) {
+      var doc = new DOMParser().parseFromString(xmlText, "application/xml");
+      var items = Array.from(doc.querySelectorAll("item")).map(function(item) {
+        var titleNode = item.querySelector("title");
+        var linkNode = item.querySelector("link");
+        var pubDateNode = item.querySelector("pubDate");
+        return {
+          title: titleNode ? titleNode.textContent : "",
+          link: linkNode ? linkNode.textContent : "",
+          pubDateMs: parseKagiPubDateMs(pubDateNode ? pubDateNode.textContent : "")
+        };
+      }).filter(function(item) {
+        return item.title && item.link;
+      }).sort(function(a, b) {
+        return b.pubDateMs - a.pubDateMs;
+      }).slice(0, 5).map(function(item) {
+        return {
+          title: item.title,
+          link: item.link
+        };
+      });
+      if (!items.length) {
+        throw new Error("No news items available");
+      }
+      return items;
+    }
+
+    function showKagiNewsFallback(feedId) {
+      var feedLabel = feedId === "tech" ? "Tech" : "World";
+      document.getElementById("kagiNewsList").innerHTML =
+        '<li class="kagi-news-fallback">' + feedLabel + ' highlights unavailable right now. <a href="https://kagi.com/news">Open Kagi News</a></li>';
+    }
+
+    function renderKagiNewsHighlights(items) {
+      document.getElementById("kagiNewsList").innerHTML = items.map(function(item) {
+        return '<li><a href="' + esc(item.link) + '">' + esc(item.title) + '</a></li>';
+      }).join("");
+    }
+
+    function setActiveKagiNewsTab(feedId) {
+      activeKagiNewsFeed = feedId;
+      document.querySelectorAll(".kagi-news-tab").forEach(function(btn) {
+        if (btn.getAttribute("data-feed") === feedId) {
+          btn.classList.add("active");
+        } else {
+          btn.classList.remove("active");
+        }
+      });
+
+      var items = kagiNewsItemsByFeed[feedId] || [];
+      if (items.length) {
+        renderKagiNewsHighlights(items);
+      } else {
+        showKagiNewsFallback(feedId);
+      }
+    }
+
+    function loadKagiNewsHighlights() {
+      var feedIds = Object.keys(kagiNewsFeeds);
+      var tasks = feedIds.map(function(feedId) {
+        return fetch(kagiNewsFeeds[feedId], { cache: "no-store" }).then(function(response) {
+          if (!response.ok) {
+            throw new Error("Failed to fetch feed");
+          }
+          return response.text();
+        }).then(function(xmlText) {
+          kagiNewsItemsByFeed[feedId] = parseKagiNewsRss(xmlText);
+        }).catch(function() {
+          kagiNewsItemsByFeed[feedId] = [];
+        });
+      });
+
+      Promise.all(tasks).then(function() {
+        setActiveKagiNewsTab(activeKagiNewsFeed);
+      });
+    }
+
+    /* ── build tree: { space: { __root__: [tab,...], folderA: { __root__: [], sub: { __root__: [] } } } } ── */
+    function buildTree(tabs) {
+      var tree = {};
+      tabs.forEach(function(tab) {
+        var space = tab.space || "(no space)";
+        if (!tree[space]) tree[space] = { __root__: [] };
+        var folder = (tab.folder || "").trim();
+        if (!folder) {
+          tree[space].__root__.push(tab);
+        } else {
+          var parts = folder.split("/");
+          var node = tree[space];
+          parts.forEach(function(part) {
+            part = part.trim();
+            if (!node[part]) node[part] = { __root__: [] };
+            node = node[part];
+          });
+          node.__root__.push(tab);
+        }
+      });
+      return tree;
+    }
+
+    /* ── render one folder node (recursive, depth controls indent) ── */
+    function renderFolderNode(name, node, depth, q, typeFilter) {
+      var items = (node.__root__ || []).filter(function(t) {
+        return matchTab(t, q, typeFilter);
+      });
+      var subKeys = Object.keys(node).filter(function(k) { return k !== "__root__"; });
+
+      var childHtml = subKeys.map(function(k) {
+        return renderFolderNode(k, node[k], depth + 1, q, typeFilter);
+      }).filter(Boolean).join("");
+
+      if (!items.length && !childHtml) return "";
+
+      var indentClass = depth === 1 ? "nested" : depth >= 2 ? "nested2" : "";
+      var tabIndentClass = depth === 0 ? "" : depth === 1 ? "indent1" : depth === 2 ? "indent2" : "indent3";
+      var count = items.length + countDeep(node, q, typeFilter);
+      var html = '<div class="folder-block ' + indentClass + '">';
+      html += '<div class="folder-header" onclick="toggleFolder(this)">';
+      html += '<span class="caret">&#9660;</span>';
+      html += '<span>📁 ' + hi(name, q) + '</span>';
+      html += '<span class="fbadge">' + count + ' tab' + (count === 1 ? "" : "s") + '</span>';
+      html += '</div>';
+      html += '<div class="folder-body">';
+      html += childHtml;
+      html += items.map(function(t) { return renderTab(t, tabIndentClass, q); }).join("");
+      html += '</div></div>';
+      return html;
+    }
+
+    function countDeep(node, q, typeFilter) {
+      var n = 0;
+      Object.keys(node).forEach(function(k) {
+        if (k === "__root__") return;
+        n += (node[k].__root__ || []).filter(function(t) { return matchTab(t, q, typeFilter); }).length;
+        n += countDeep(node[k], q, typeFilter);
+      });
+      return n;
+    }
+
+    function matchTab(tab, q, typeFilter) {
+      if (typeFilter && tab.type !== typeFilter) return false;
+      if (!q) return true;
+      var blob = (tab.title || "") + " " + (tab.url || "") + " " + (tab.folder || "");
+      return blob.toLowerCase().indexOf(q) !== -1;
+    }
+
+    function renderTab(tab, indentClass, q) {
+      var type = tab.type || "normal";
+      return '<div class="tab-row ' + indentClass + '">' +
+        '<div class="tab-icon">' + typeIcon(type) + '</div>' +
+        '<div class="tab-main">' +
+          '<div class="tab-title"><a href="' + esc(tab.url || "about:blank") + '" target="_blank" rel="noreferrer">' + hi(tab.title || "Untitled", q) + '</a></div>' +
+          '<div class="tab-url">' + hi(tab.url || "", q) + '</div>' +
+        '</div>' +
+        '<span class="pill ' + type + '">' + type + '</span>' +
+      '</div>';
+    }
+
+    /* ── render full tree ── */
+    function renderTree() {
+      var q = document.getElementById("q").value.trim().toLowerCase();
+      var typeFilter = document.getElementById("typeFilter").value;
+      var tree = buildTree(allTabs);
+      var container = document.getElementById("tree");
+      var html = "";
+      var spaceNames = Object.keys(tree).sort();
+
+      spaceNames.forEach(function(space) {
+        var node = tree[space];
+        var rootTabs = (node.__root__ || []).filter(function(t) { return matchTab(t, q, typeFilter); });
+        var subKeys = Object.keys(node).filter(function(k) { return k !== "__root__"; });
+        var childHtml = subKeys.map(function(k) {
+          return renderFolderNode(k, node[k], 0, q, typeFilter);
+        }).filter(Boolean).join("");
+
+        if (!rootTabs.length && !childHtml) return;
+
+        var total = rootTabs.length + countDeep(node, q, typeFilter);
+        html += '<div class="space-block" data-space="' + esc(space) + '">';
+        html += '<button class="space-header" onclick="toggleSpace(this)">';
+        html += '<span class="caret">&#9660;</span>';
+        html += '<span>' + hi(space, q) + '</span>';
+        html += '<span class="badge">' + total + ' tab' + (total === 1 ? "" : "s") + '</span>';
+        html += '</button>';
+        html += '<div class="space-body">';
+        html += childHtml;
+        html += rootTabs.map(function(t) { return renderTab(t, "", q); }).join("");
+        html += '</div></div>';
+      });
+
+      container.innerHTML = html || '<div class="empty">No tabs match your filter.</div>';
+    }
+
+    /* ── toggle helpers ── */
+    function toggleSpace(btn) {
+      btn.closest(".space-block").classList.toggle("collapsed");
+    }
+    function toggleFolder(hdr) {
+      hdr.closest(".folder-block").classList.toggle("collapsed");
+    }
+
+    function setCollapsedForAll(collapsed) {
+      var method = collapsed ? "add" : "remove";
+      document.querySelectorAll(".space-block").forEach(function(space) {
+        space.classList[method]("collapsed");
+        space.querySelectorAll(".folder-block").forEach(function(folder) {
+          folder.classList[method]("collapsed");
+        });
+      });
+    }
+
+    document.getElementById("expandAll").addEventListener("click", function() {
+      setCollapsedForAll(false);
+    });
+    document.getElementById("collapseAll").addEventListener("click", function() {
+      setCollapsedForAll(true);
+    });
+
+    /* ── stat cards ── */
+    function drawCards(stats) {
+      var entries = [
+        ["Total", stats.total],
+        ["Essential", stats.essential],
+        ["Pinned", stats.pinned],
+        ["Normal", stats.normal],
+        ["Spaces", stats.spaces],
+      ];
+      document.getElementById("cards").innerHTML = entries.map(function(e) {
+        return '<div class="card"><div class="k">' + e[0] + '</div><div class="v">' + e[1] + '</div></div>';
+      }).join("");
+    }
+
+    /* ── boot ── */
+    var debounceTimer;
+    var didInitialCollapse = false;
+    function onFilter() {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(renderTree, 120);
+    }
+
+    document.getElementById("q").addEventListener("input", onFilter);
+    document.getElementById("typeFilter").addEventListener("change", renderTree);
+    document.getElementById("kagiResearchGo").addEventListener("click", goKagiResearch);
+    document.getElementById("kagiAssistantGo").addEventListener("click", goKagiAssistant);
+    document.getElementById("kagiResearchQuery").addEventListener("keydown", function(event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        goKagiResearch();
+      }
+    });
+    document.getElementById("kagiAssistantQuery").addEventListener("keydown", function(event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        goKagiAssistant();
+      }
+    });
+    document.querySelectorAll(".kagi-news-tab").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        setActiveKagiNewsTab(btn.getAttribute("data-feed"));
+      });
+    });
+
+    loadKagiNewsHighlights();
+
+    fetch("./tabs.json", { cache: "no-store" }).then(function(r) {
+      return r.json();
+    }).then(function(data) {
+      allTabs = data.tabs || [];
+      if (data.title) {
+        document.getElementById("pageTitle").textContent = data.title;
+        document.title = data.title;
+      }
+      document.getElementById("generated").textContent = "Generated: " + new Date(data.generatedAt).toLocaleString();
+      drawCards(data.stats || { total: 0, essential: 0, pinned: 0, normal: 0, spaces: 0 });
+      renderTree();
+      if (!didInitialCollapse) {
+        setCollapsedForAll(true);
+        didInitialCollapse = true;
+      }
+    }).catch(function(err) {
+      document.getElementById("tree").innerHTML = '<div class="empty">Failed to load tabs.json: ' + String(err) + '</div>';
+    });
+  </script>
+</body>
+</html>

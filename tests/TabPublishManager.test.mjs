@@ -1,8 +1,15 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { TabPublishManager } from "../content/TabPublishManager.mjs";
 import { makeManager } from "./helpers/mocks.mjs";
+
+const DASHBOARD_HTML = readFileSync(
+  fileURLToPath(new URL("../content/dashboard.html", import.meta.url)),
+  "utf8"
+);
 
 function makePublishManager({ tabs = [], preferences = {} } = {}) {
   const mgr = makeManager({ tabs, preferences: { ...preferences } });
@@ -47,14 +54,60 @@ describe("TabPublishManager", () => {
     assert.equal(payload.stats.normal, 1);
     assert.equal(payload.stats.spaces, 2);
     assert.equal(payload.tabs[0].folder, "Ops/Inbox");
+    assert.equal(typeof payload.title, "string", "payload must include a title field");
   });
 
-  test("buildDashboardHtml contains fetch to tabs.json and page title", () => {
-    const { pub } = makePublishManager();
-    const html = pub.buildDashboardHtml("My Dashboard");
-    assert.match(html, /<title>My Dashboard<\/title>/);
-    assert.match(html, /fetch\("\.\/tabs\.json"/);
-    assert.match(html, /Search title\/url\/folder/);
+  test("dashboard.html is fully static and reads title from JSON at runtime", () => {
+    assert.match(DASHBOARD_HTML, /<title>ZenTabs Dashboard<\/title>/);
+    assert.match(DASHBOARD_HTML, /fetch\("\.\/tabs\.json"/);
+    assert.match(DASHBOARD_HTML, /data\.title/);
+    assert.match(DASHBOARD_HTML, /Search tabs/);
+  });
+
+  test("dashboard.html renders hierarchical tree structure", () => {
+    assert.match(DASHBOARD_HTML, /space-block/);
+    assert.match(DASHBOARD_HTML, /folder-block/);
+    assert.match(DASHBOARD_HTML, /buildTree/);
+    assert.match(DASHBOARD_HTML, /renderFolderNode/);
+    assert.match(DASHBOARD_HTML, /expandAll/);
+    assert.match(DASHBOARD_HTML, /collapseAll/);
+    assert.match(DASHBOARD_HTML, /function setCollapsedForAll\(collapsed\)/);
+    assert.match(DASHBOARD_HTML, /space\.querySelectorAll\("\.folder-block"\)/);
+    assert.match(DASHBOARD_HTML, /setCollapsedForAll\(true\)/);
+  });
+
+  test("dashboard.html includes Kagi quick actions and news highlights", () => {
+    assert.match(DASHBOARD_HTML, /kagiResearchQuery/);
+    assert.match(DASHBOARD_HTML, /kagiAssistantQuery/);
+    assert.match(DASHBOARD_HTML, /buildKagiResearchUrl/);
+    assert.match(DASHBOARD_HTML, /buildKagiAssistantUrl/);
+    assert.match(DASHBOARD_HTML, /window\.location\.href = buildKagiResearchUrl\(query\)/);
+    assert.match(DASHBOARD_HTML, /window\.location\.href = buildKagiAssistantUrl\(query\)/);
+    assert.match(DASHBOARD_HTML, /Kagi News Highlights/);
+    assert.match(DASHBOARD_HTML, /loadKagiNewsHighlights/);
+    assert.match(DASHBOARD_HTML, /https:\/\/news\.kagi\.com\/world\.xml/);
+    assert.match(DASHBOARD_HTML, /https:\/\/news\.kagi\.com\/tech\.xml/);
+    assert.match(DASHBOARD_HTML, /https:\/\/news\.kagi\.com\/science\.xml/);
+    assert.match(DASHBOARD_HTML, /https:\/\/news\.kagi\.com\/sports\.xml/);
+    assert.match(DASHBOARD_HTML, /https:\/\/news\.kagi\.com\/gaming\.xml/);
+    assert.match(DASHBOARD_HTML, /data-feed="world"/);
+    assert.match(DASHBOARD_HTML, /data-feed="tech"/);
+    assert.match(DASHBOARD_HTML, /data-feed="science"/);
+    assert.match(DASHBOARD_HTML, /data-feed="sports"/);
+    assert.match(DASHBOARD_HTML, /data-feed="gaming"/);
+    assert.match(DASHBOARD_HTML, /setActiveKagiNewsTab\(activeKagiNewsFeed\)/);
+    assert.match(DASHBOARD_HTML, /parseKagiPubDateMs/);
+    assert.match(DASHBOARD_HTML, /\.sort\(function\(a, b\)/);
+    assert.match(DASHBOARD_HTML, /\.slice\(0, 5\)/);
+    assert.match(DASHBOARD_HTML, /Open Kagi News/);
+  });
+
+  test("dashboard.html shows world tab before tech tab", () => {
+    const worldPos = DASHBOARD_HTML.indexOf('data-feed="world"');
+    const techPos = DASHBOARD_HTML.indexOf('data-feed="tech"');
+    assert.notEqual(worldPos, -1);
+    assert.notEqual(techPos, -1);
+    assert.ok(worldPos < techPos, "World feed tab should appear before Tech");
   });
 
   test("isConfigured reflects required SFTP prefs", () => {
@@ -131,6 +184,11 @@ describe("TabPublishManager", () => {
       return { code: 0 };
     };
 
+    // Seed the mock IOUtils with the real dashboard.html at the path
+    // that _readDashboardHtml() will resolve from import.meta.url.
+    const dashboardFilePath = fileURLToPath(new URL("../content/dashboard.html", import.meta.url));
+    globalThis.IOUtils._store.set(dashboardFilePath, DASHBOARD_HTML);
+
     const result = await pub.publishTabsToSftp();
 
     assert.equal(result.success, true);
@@ -159,6 +217,9 @@ describe("TabPublishManager", () => {
     mgr.window.ZenTabsProcessRunner = async () => {
       throw new Error("permission denied");
     };
+
+    const dashboardFilePath = fileURLToPath(new URL("../content/dashboard.html", import.meta.url));
+    globalThis.IOUtils._store.set(dashboardFilePath, DASHBOARD_HTML);
 
     const result = await pub.publishTabsToSftp();
 

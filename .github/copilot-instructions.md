@@ -289,6 +289,7 @@ All approved feature specs live in the `specs/` directory. Consult the relevant 
 | `specs/ActionResultsWindow.spec.md` | Compact action results dialog for list/sync/restore/dry-run/cleanup/memory/statistics | Implemented — 2026-06-24 |
 | `specs/SyncToBookmarksDryRun.spec.md` | Replace List All Tabs with Sync to Bookmarks dry-run preview | Implemented — 2026-06-24 |
 | `specs/SftpTabPublish.spec.md` | Export tabs to JSON + static dashboard and upload to SFTP | Implemented — 2026-06-24 |
+| `specs/KagiDashboardIntegrations.spec.md` | Dashboard Kagi Research/Assistant launchers + Kagi News highlights | Implemented — 2026-06-25 |
 
 ---
 
