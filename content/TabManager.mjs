@@ -78,8 +78,8 @@ export class TabManager {
       muted: tab.muted,
       soundPlaying: tab.soundPlaying,
       container: tab.userContextId || null,
-      lastAccessed: tab.lastAccessed || Date.now(),
-      createdAt: tab.createdAt || Date.now(),
+      lastAccessed: this.getTabLastAccessedTimestamp(tab) || Date.now(),
+      createdAt: this.getTabCreatedTimestamp(tab) || Date.now(),
       ...this.getTabAge(tab)
     };
   }
@@ -259,8 +259,8 @@ export class TabManager {
    */
   getTabAge(tab) {
     const now = Date.now();
-    const lastAccessed = tab.lastAccessed || tab.createdAt || now;
-    const createdAt = tab.createdAt || lastAccessed;
+    const lastAccessed = this.getTabLastAccessedTimestamp(tab) || this.getTabCreatedTimestamp(tab) || now;
+    const createdAt = this.getTabCreatedTimestamp(tab) || lastAccessed;
     
     const ageMs = now - lastAccessed;
     const createdAgeMs = now - createdAt;
@@ -281,6 +281,73 @@ export class TabManager {
         days: Math.floor(createdAgeMs / 86400000)
       }
     };
+  }
+
+  /**
+   * Resolve the best available last-accessed timestamp for a tab.
+   *
+   * Firefox/Zen may not keep tab.lastAccessed stable across restarts, so we
+   * also look at session-store payloads when available.
+   */
+  getTabLastAccessedTimestamp(tab) {
+    return this._readTabTimestamp(tab, [
+      ["lastAccessed"],
+      ["linkedBrowser", "__SS_data", "lastAccessed"],
+      ["linkedBrowser", "__SS_data", "tabData", "lastAccessed"],
+      ["linkedBrowser", "__SS_data", "state", "lastAccessed"],
+      ["linkedBrowser", "__SS_data", "lastAccessedAt"],
+    ]);
+  }
+
+  /**
+   * Resolve the best available created timestamp for a tab.
+   */
+  getTabCreatedTimestamp(tab) {
+    return this._readTabTimestamp(tab, [
+      ["createdAt"],
+      ["linkedBrowser", "__SS_data", "createdAt"],
+      ["linkedBrowser", "__SS_data", "tabData", "createdAt"],
+      ["linkedBrowser", "__SS_data", "state", "createdAt"],
+    ]);
+  }
+
+  _readTabTimestamp(tab, paths) {
+    for (const path of paths) {
+      let value = tab;
+      for (const key of path) {
+        value = value?.[key];
+      }
+      const timestamp = Number(value);
+      if (Number.isFinite(timestamp) && timestamp > 0) {
+        return timestamp;
+      }
+    }
+
+    try {
+      const ss = this.manager.window.SessionStore;
+      if (ss?.getTabState) {
+        const rawState = ss.getTabState(tab);
+        const state = typeof rawState === "string" ? JSON.parse(rawState) : rawState;
+        const candidates = [
+          state?.lastAccessed,
+          state?.createdAt,
+          state?.tabData?.lastAccessed,
+          state?.tabData?.createdAt,
+          state?.tabData?.lastAccessedAt,
+        ];
+
+        for (const candidate of candidates) {
+          const timestamp = Number(candidate);
+          if (Number.isFinite(timestamp) && timestamp > 0) {
+            return timestamp;
+          }
+        }
+      }
+    } catch (error) {
+      // non-fatal: if session data is unavailable or malformed, fall back below
+    }
+
+    return 0;
   }
 
   /**

@@ -430,6 +430,16 @@ export function makeManager({
   const gZenWorkspaces = makeGZenWorkspaces(workspaces, tabs);
   const gZenFolders    = makeGZenFolders();
   const ContextualIdentityService = makeContextualIdentityService();
+  const SessionStore = {
+    getTabState(tab) {
+      if (typeof tab.__sessionState === "function") return tab.__sessionState();
+      return tab.__sessionState ?? JSON.stringify({
+        lastAccessed: tab.lastAccessed,
+        createdAt: tab.createdAt,
+        tabData: tab.__SS_data ?? undefined,
+      });
+    },
+  };
   const gZenPinnedTabManager = {
     addToEssentialsCalls: [],
     addToEssentials(tab) {
@@ -482,6 +492,7 @@ export function makeManager({
       gZenFolders,
       gZenPinnedTabManager,
       ContextualIdentityService,
+      SessionStore,
       Services,
       setInterval:   (fn, ms) => null,
       clearInterval: () => {},

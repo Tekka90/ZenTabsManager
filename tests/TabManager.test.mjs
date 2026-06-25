@@ -83,6 +83,24 @@ describe("getAllTabs", () => {
     const tabs = await tm.getAllTabs();
     assert.equal(tabs.length, 1);
   });
+
+  test("uses session-store timestamps when tab.lastAccessed is not reliable", async () => {
+    const restartAgeMs = 30 * 86400000;
+    const tab = makeTab({
+      url: "https://old-after-restart.com",
+      lastAccessed: 0,
+      createdAt: 0,
+      __SS_data: { lastAccessed: Date.now() - restartAgeMs, createdAt: Date.now() - (restartAgeMs + 86400000) },
+    });
+    const mgr = makeManager({ tabs: [tab] });
+
+    const tm = new TabManager(mgr);
+    await tm.rebuildCache();
+    const tabs = await tm.getAllTabs();
+
+    assert.equal(tabs.length, 1);
+    assert.ok(tabs[0].lastAccessedAge.days >= 29);
+  });
 });
 
 // ── getTabsFiltered ──────────────────────────────────────────────────────
