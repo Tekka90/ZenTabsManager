@@ -204,6 +204,65 @@
     /* ── Tree ── */
     #tree { display: flex; flex-direction: column; gap: 12px; }
 
+    .open-tabs-panel {
+      margin-top: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+    .open-tabs-header {
+      padding: 12px 14px 10px;
+      border-bottom: 1px solid var(--line);
+      background: #f7f4ee;
+    }
+    .open-tabs-header h2 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+      color: #2f2b26;
+    }
+    .open-tabs-sub {
+      margin-top: 3px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .open-tabs-list {
+      display: flex;
+      flex-direction: column;
+    }
+    .open-tab-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 9px 14px;
+      border-bottom: 1px solid #f0ece4;
+      transition: background 0.1s;
+    }
+    .open-tab-row:last-child { border-bottom: none; }
+    .open-tab-row:hover { background: var(--tab-hover); }
+    .open-tab-main { flex: 1; min-width: 0; }
+    .open-tab-meta {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .space-pill {
+      flex-shrink: 0;
+      font-size: 10px;
+      color: #184f56;
+      background: #d6ecef;
+      border-radius: 999px;
+      padding: 2px 8px;
+      margin-top: 2px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
     /* Space block */
     .space-block {}
     .space-header {
@@ -378,10 +437,19 @@
     </div>
 
     <div id="tree"></div>
+
+    <section class="open-tabs-panel" id="openTabsSection">
+      <div class="open-tabs-header">
+        <h2>Open Tabs</h2>
+        <div class="open-tabs-sub">Normal (non-essential and non-pinned) tabs across all spaces.</div>
+      </div>
+      <div class="open-tabs-list" id="openTabsList"></div>
+    </section>
   </div>
 
   <script>
     var allTabs = [];
+    var openTabs = [];
 
     /* ── helpers ── */
     function esc(s) {
@@ -595,6 +663,30 @@
       '</div>';
     }
 
+    function renderOpenTabs() {
+      var container = document.getElementById("openTabsList");
+      if (!openTabs.length) {
+        container.innerHTML = '<div class="empty">No open normal tabs.</div>';
+        return;
+      }
+
+      container.innerHTML = openTabs.map(function(tab) {
+        var title = tab.title || "Untitled";
+        var url = tab.url || "about:blank";
+        var space = tab.space || "default";
+        var folder = tab.folder ? 'Folder: ' + esc(tab.folder) : 'No folder';
+        return '<div class="open-tab-row">' +
+          '<div class="tab-icon">' + typeIcon("normal") + '</div>' +
+          '<div class="open-tab-main">' +
+            '<div class="tab-title"><a href="' + esc(url) + '" target="_blank" rel="noreferrer">' + esc(title) + '</a></div>' +
+            '<div class="tab-url">' + esc(url) + '</div>' +
+            '<div class="open-tab-meta">' + folder + '</div>' +
+          '</div>' +
+          '<span class="space-pill">' + esc(space) + '</span>' +
+        '</div>';
+      }).join("");
+    }
+
     /* ── render full tree ── */
     function renderTree() {
       var q = document.getElementById("q").value.trim().toLowerCase();
@@ -705,6 +797,7 @@
       return r.json();
     }).then(function(data) {
       allTabs = data.tabs || [];
+      openTabs = data.openTabs || [];
       if (data.title) {
         document.getElementById("pageTitle").textContent = data.title;
         document.title = data.title;
@@ -712,6 +805,7 @@
       document.getElementById("generated").textContent = "Generated: " + new Date(data.generatedAt).toLocaleString();
       drawCards(data.stats || { total: 0, essential: 0, pinned: 0, normal: 0, spaces: 0 });
       renderTree();
+      renderOpenTabs();
       if (!didInitialCollapse) {
         setCollapsedForAll(true);
         didInitialCollapse = true;

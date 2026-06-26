@@ -16,78 +16,6 @@ export class TabPublishManager {
 
   async init() {
     this.log("TabPublishManager initialized");
-    // Save dashboard HTML to profile directory and cache it on init
-    try {
-      await this._ensureDashboardHtmlAvailable();
-      _cachedDashboardHtml = await this._readDashboardHtml();
-    } catch (err) {
-      this.log("Warning: Could not pre-load dashboard.html on init:", err.message);
-      // Caching is optional - will fall back to generated fallback at publish time
-    }
-  }
-
-  async _ensureDashboardHtmlAvailable() {
-    const io = globalThis.IOUtils;
-    const PathUtils = globalThis.PathUtils;
-    
-    if (!io || !PathUtils) return;
-    
-    try {
-      const cacheDir = PathUtils.join(PathUtils.profileDir, "zentabs-dashboard");
-      const cachedPath = PathUtils.join(cacheDir, "dashboard.html");
-      
-      // Check if already cached
-      if (await io.exists(cachedPath)) {
-        return; // Already cached
-      }
-      
-      // Try to read from mod directory first
-      await io.makeDirectory(cacheDir);
-      
-      // Try using fetch (mod-friendly approach)
-      try {
-        // Try to fetch from content/ directory (this file's directory)
-        const baseUrl = new URL(".", import.meta.url).href;
-        const dashboardUrl = new URL("dashboard.html", baseUrl).href;
-        const response = await fetch(dashboardUrl);
-        if (response.ok) {
-          const content = await response.text();
-          await io.writeUTF8(cachedPath, content);
-          return; // Success
-        }
-      } catch (fetchErr) {
-        this.log("Fetch from content/ failed:", fetchErr.message);
-      }
-      
-      // Fallback: Try direct file I/O from content directory
-      const possibleSources = [];
-      
-      // This file is in content/, so dashboard.html is in the same directory
-      try {
-        const moduleUrl = new URL(import.meta.url);
-        if (moduleUrl.protocol === "file:") {
-          const dir = new URL(".", moduleUrl).pathname;
-          possibleSources.push(PathUtils.join(dir, "dashboard.html"));
-        }
-      } catch (e) {
-        // ignore
-      }
-      
-      // Try to read from each source
-      for (const sourcePath of possibleSources) {
-        try {
-          const content = await io.readUTF8(sourcePath);
-          // Found it! Cache to profile directory
-          await io.writeUTF8(cachedPath, content);
-          return; // Success
-        } catch (err) {
-          // continue to next source
-        }
-      }
-    } catch (err) {
-      this.log("Could not ensure dashboard HTML availability:", err.message);
-      // Not critical - will fall back to generated version
-    }
   }
 
   isConfigured() {
@@ -115,6 +43,9 @@ export class TabPublishManager {
       lastAccessed: tab.lastAccessed ?? Date.now(),
     }));
 
+    const publishedTabs = list.filter(t => t.type === "essential" || t.type === "pinned");
+    const openTabs = list.filter(t => t.type === "normal");
+
     const stats = {
       total: list.length,
       essential: list.filter(t => t.type === "essential").length,
@@ -129,7 +60,8 @@ export class TabPublishManager {
       source: "ZenTabsManager",
       title: this.manager.preferences?.publishSftpDashboardTitle || "ZenTabs Dashboard",
       stats,
-      tabs: list,
+      tabs: publishedTabs,
+      openTabs,
     };
   }
   async _readDashboardHtml() {
@@ -143,8 +75,6 @@ export class TabPublishManager {
     
     if (!io) throw new Error("IOUtils not available");
     
-    const errors = [];
-    
     // 1. Try fetch first (works in mod context)
     // TabPublishManager.mjs is in content/, same dir as dashboard.html
     try {
@@ -157,30 +87,12 @@ export class TabPublishManager {
         this.log("Successfully loaded dashboard.html via fetch");
         _cachedDashboardHtml = content;
         return content;
-      } else {
-        errors.push(`fetch returned ${response.status}`);
       }
     } catch (err) {
-      errors.push(`fetch error: ${err.message}`);
       this.log(`Fetch failed: ${err.message}`);
     }
     
-    // 2. Try cached copy in profile directory
-    if (PathUtils) {
-      try {
-        const cachedPath = PathUtils.join(PathUtils.profileDir, "zentabs-dashboard", "dashboard.html");
-        this.log(`Trying profile cache: ${cachedPath}`);
-        const content = await io.readUTF8(cachedPath);
-        this.log("Successfully loaded dashboard.html from profile cache");
-        _cachedDashboardHtml = content;
-        return content;
-      } catch (err) {
-        errors.push(`profile cache error: ${err.message}`);
-        this.log(`Profile cache failed: ${err.message}`);
-      }
-    }
-    
-    // 3. Try direct file I/O from content directory (same dir as this file)
+    // 2. Try direct file I/O from content directory (same dir as this file)
     try {
       const moduleUrl = new URL(import.meta.url);
       if (moduleUrl.protocol === "file:") {
@@ -193,68 +105,11 @@ export class TabPublishManager {
         return content;
       }
     } catch (err) {
-      errors.push(`file I/O error: ${err.message}`);
       this.log(`File I/O failed: ${err.message}`);
     }
     
-    // If all paths failed, log diagnostics and generate a minimal fallback dashboard
-    this.log("Warning: Could not read dashboard.html from any source, using fallback");
-    this.log(`This file (TabPublishManager.mjs) location: ${import.meta.url}`);
-    this.log(`Errors encountered: ${errors.join("; ")}`);
-    
-    const fallback = this._generateFallbackDashboardHtml();
-    _cachedDashboardHtml = fallback;
-    return fallback;
-  }
-
-  _generateFallbackDashboardHtml() {
-    // Minimal fallback dashboard HTML in case file is not found
-    // This ensures the feature works even if asset loading fails
-    return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ZenTabs Dashboard</title>
-  <style>
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: system-ui, sans-serif; background: #f5f5f5; padding: 20px; }
-    .container { max-width: 800px; margin: 0 auto; background: white; padding: 24px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    h1 { margin-top: 0; color: #333; }
-    .error { background: #fffbeb; border: 1px solid #fcd34d; color: #92400e; padding: 12px; border-radius: 4px; margin: 12px 0; }
-    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 16px 0; }
-    .stat { background: #f9f9f9; padding: 16px; border-radius: 4px; text-align: center; }
-    .stat-value { font-size: 24px; font-weight: bold; color: #1f6f78; }
-    .stat-label { font-size: 12px; color: #666; margin-top: 4px; }
-    .tabs-list { list-style: none; padding: 0; margin: 16px 0; }
-    .tabs-list li { padding: 8px; border-bottom: 1px solid #eee; }
-    .tab-title { font-weight: 500; }
-    .tab-url { font-size: 12px; color: #666; margin-top: 4px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1 id="pageTitle">ZenTabs Dashboard</h1>
-    <div class="error">⚠️ Note: This is a minimal fallback dashboard. The full dashboard HTML file was not found.</div>
-    <div id="generated"></div>
-    <div class="stats" id="cards"></div>
-    <div id="tree"></div>
-  </div>
-  <script>
-    function drawCards(stats) {
-      const entries = [["Total", stats.total], ["Essential", stats.essential], ["Pinned", stats.pinned], ["Normal", stats.normal], ["Spaces", stats.spaces]];
-      document.getElementById("cards").innerHTML = entries.map(e => '<div class="stat"><div class="stat-value">' + e[1] + '</div><div class="stat-label">' + e[0] + '</div></div>').join("");
-    }
-    fetch("./tabs.json", { cache: "no-store" }).then(r => r.json()).then(data => {
-      if (data.title) { document.getElementById("pageTitle").textContent = data.title; document.title = data.title; }
-      document.getElementById("generated").textContent = "Generated: " + new Date(data.generatedAt).toLocaleString();
-      drawCards(data.stats || {});
-      const html = '<ul class="tabs-list">' + (data.tabs || []).map(t => '<li><div class="tab-title"><a href="' + (t.url || "about:blank") + '" target="_blank">' + (t.title || "Untitled") + '</a></div><div class="tab-url">' + (t.url || "") + '</div></li>').join("") + '</ul>';
-      document.getElementById("tree").innerHTML = html;
-    }).catch(err => { document.getElementById("tree").innerHTML = '<div class="error">Failed to load tabs.json: ' + err + '</div>'; });
-  </script>
-</body>
-</html>`;
+    // If all paths failed, throw error
+    throw new Error("Could not load dashboard.html - verify the file exists in content/ directory");
   }
 
   _quoteForBatch(value) {

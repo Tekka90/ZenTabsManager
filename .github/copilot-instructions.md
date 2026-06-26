@@ -291,6 +291,7 @@ All approved feature specs live in the `specs/` directory. Consult the relevant 
 | `specs/SftpTabPublish.spec.md` | Export tabs to JSON + static dashboard and upload to SFTP | Implemented — 2026-06-24 |
 | `specs/KagiDashboardIntegrations.spec.md` | Dashboard Kagi Research/Assistant launchers + Kagi News highlights | Implemented — 2026-06-25 |
 | `specs/ManualCleanupOptimizerConfirm.spec.md` | Manual cleanup/optimizer preview with OK/Cancel confirmation before execution | Implemented — 2026-06-25 |
+| `specs/OpenTabsSectionInPublishDashboard.spec.md` | Published dashboard end-section listing open normal tabs across spaces | Implemented — 2026-06-26 |
 
 ---
 

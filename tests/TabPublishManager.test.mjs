@@ -22,7 +22,7 @@ function makePublishManager({ tabs = [], preferences = {} } = {}) {
 }
 
 describe("TabPublishManager", () => {
-  test("buildTabsPayload includes stats and normalized tab fields", () => {
+  test("buildTabsPayload splits published tabs and open normal tabs", () => {
     const tabs = [
       {
         title: "Mail",
@@ -53,7 +53,11 @@ describe("TabPublishManager", () => {
     assert.equal(payload.stats.essential, 1);
     assert.equal(payload.stats.normal, 1);
     assert.equal(payload.stats.spaces, 2);
+    assert.equal(payload.tabs.length, 1);
+    assert.equal(payload.tabs[0].type, "essential");
     assert.equal(payload.tabs[0].folder, "Ops/Inbox");
+    assert.equal(payload.openTabs.length, 1);
+    assert.equal(payload.openTabs[0].type, "normal");
     assert.equal(typeof payload.title, "string", "payload must include a title field");
   });
 
@@ -74,6 +78,14 @@ describe("TabPublishManager", () => {
     assert.match(DASHBOARD_HTML, /function setCollapsedForAll\(collapsed\)/);
     assert.match(DASHBOARD_HTML, /space\.querySelectorAll\("\.folder-block"\)/);
     assert.match(DASHBOARD_HTML, /setCollapsedForAll\(true\)/);
+  });
+
+  test("dashboard.html includes open tabs section and openTabs fallback", () => {
+    assert.match(DASHBOARD_HTML, /<h2>Open Tabs<\/h2>/);
+    assert.match(DASHBOARD_HTML, /id="openTabsList"/);
+    assert.match(DASHBOARD_HTML, /function renderOpenTabs\(\)/);
+    assert.match(DASHBOARD_HTML, /openTabs = data\.openTabs \|\| \[\]/);
+    assert.match(DASHBOARD_HTML, /No open normal tabs\./);
   });
 
   test("dashboard.html includes Kagi quick actions and news highlights", () => {
