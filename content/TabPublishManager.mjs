@@ -16,12 +16,77 @@ export class TabPublishManager {
 
   async init() {
     this.log("TabPublishManager initialized");
-    // Pre-load and cache the dashboard HTML on init
+    // Save dashboard HTML to profile directory and cache it on init
     try {
+      await this._ensureDashboardHtmlAvailable();
       _cachedDashboardHtml = await this._readDashboardHtml();
     } catch (err) {
       this.log("Warning: Could not pre-load dashboard.html on init:", err.message);
-      // Caching is optional - will fall back to file I/O at publish time
+      // Caching is optional - will fall back to generated fallback at publish time
+    }
+  }
+
+  async _ensureDashboardHtmlAvailable() {
+    const io = globalThis.IOUtils;
+    const PathUtils = globalThis.PathUtils;
+    
+    if (!io || !PathUtils) return;
+    
+    try {
+      const cacheDir = PathUtils.join(PathUtils.profileDir, "zentabs-dashboard");
+      const cachedPath = PathUtils.join(cacheDir, "dashboard.html");
+      
+      // Check if already cached
+      if (await io.exists(cachedPath)) {
+        return; // Already cached
+      }
+      
+      // Try to read from mod directory first
+      await io.makeDirectory(cacheDir);
+      
+      // Try using fetch (mod-friendly approach)
+      try {
+        // Try to fetch from content/ directory (this file's directory)
+        const baseUrl = new URL(".", import.meta.url).href;
+        const dashboardUrl = new URL("dashboard.html", baseUrl).href;
+        const response = await fetch(dashboardUrl);
+        if (response.ok) {
+          const content = await response.text();
+          await io.writeUTF8(cachedPath, content);
+          return; // Success
+        }
+      } catch (fetchErr) {
+        this.log("Fetch from content/ failed:", fetchErr.message);
+      }
+      
+      // Fallback: Try direct file I/O from content directory
+      const possibleSources = [];
+      
+      // This file is in content/, so dashboard.html is in the same directory
+      try {
+        const moduleUrl = new URL(import.meta.url);
+        if (moduleUrl.protocol === "file:") {
+          const dir = new URL(".", moduleUrl).pathname;
+          possibleSources.push(PathUtils.join(dir, "dashboard.html"));
+        }
+      } catch (e) {
+        // ignore
+      }
+      
+      // Try to read from each source
+      for (const sourcePath of possibleSources) {
+        try {
+          const content = await io.readUTF8(sourcePath);
+          // Found it! Cache to profile directory
+          await io.writeUTF8(cachedPath, content);
+          return; // Success
+        } catch (err) {
+          // continue to next source
+        }
+      }
+    } catch (err) {
+      this.log("Could not ensure dashboard HTML availability:", err.message);
+      // Not critical - will fall back to generated version
     }
   }
 
@@ -78,47 +143,65 @@ export class TabPublishManager {
     
     if (!io) throw new Error("IOUtils not available");
     
-    // Try multiple possible locations for dashboard.html
-    const possiblePaths = [];
+    const errors = [];
     
-    // 1. Relative to module (file:// protocol)
+    // 1. Try fetch first (works in mod context)
+    // TabPublishManager.mjs is in content/, same dir as dashboard.html
+    try {
+      const baseUrl = new URL(".", import.meta.url).href;
+      const dashboardUrl = new URL("dashboard.html", baseUrl).href;
+      this.log(`Attempting to fetch dashboard from: ${dashboardUrl}`);
+      const response = await fetch(dashboardUrl);
+      if (response.ok) {
+        const content = await response.text();
+        this.log("Successfully loaded dashboard.html via fetch");
+        _cachedDashboardHtml = content;
+        return content;
+      } else {
+        errors.push(`fetch returned ${response.status}`);
+      }
+    } catch (err) {
+      errors.push(`fetch error: ${err.message}`);
+      this.log(`Fetch failed: ${err.message}`);
+    }
+    
+    // 2. Try cached copy in profile directory
+    if (PathUtils) {
+      try {
+        const cachedPath = PathUtils.join(PathUtils.profileDir, "zentabs-dashboard", "dashboard.html");
+        this.log(`Trying profile cache: ${cachedPath}`);
+        const content = await io.readUTF8(cachedPath);
+        this.log("Successfully loaded dashboard.html from profile cache");
+        _cachedDashboardHtml = content;
+        return content;
+      } catch (err) {
+        errors.push(`profile cache error: ${err.message}`);
+        this.log(`Profile cache failed: ${err.message}`);
+      }
+    }
+    
+    // 3. Try direct file I/O from content directory (same dir as this file)
     try {
       const moduleUrl = new URL(import.meta.url);
       if (moduleUrl.protocol === "file:") {
         const dir = new URL(".", moduleUrl).pathname;
-        possiblePaths.push(dir + "dashboard.html");
-      }
-    } catch (e) {
-      // ignore
-    }
-    
-    // 2. If available, try PathUtils-based path
-    if (PathUtils) {
-      try {
-        // Try to construct path from profile dir (fallback for mod context)
-        const profilePath = PathUtils.profileDir;
-        possiblePaths.push(profilePath + "/zentabs-dashboard-cache/dashboard.html");
-      } catch (e) {
-        // ignore
-      }
-    }
-    
-    // Try each path in order
-    let lastError = null;
-    for (const path of possiblePaths) {
-      try {
-        const content = await io.readUTF8(path);
-        // Cache for future use
+        const filePath = dir + "dashboard.html";
+        this.log(`Trying file I/O: ${filePath}`);
+        const content = await io.readUTF8(filePath);
+        this.log("Successfully loaded dashboard.html via file I/O");
         _cachedDashboardHtml = content;
         return content;
-      } catch (err) {
-        lastError = err;
-        // continue to next path
       }
+    } catch (err) {
+      errors.push(`file I/O error: ${err.message}`);
+      this.log(`File I/O failed: ${err.message}`);
     }
     
-    // If all paths failed, generate a minimal fallback dashboard
-    this.log("Warning: Could not read dashboard.html from filesystem, using fallback");
+    // If all paths failed, log diagnostics and generate a minimal fallback dashboard
+    this.log("Warning: Could not read dashboard.html from any source, using fallback");
+    this.log(`This file (TabPublishManager.mjs) location: ${import.meta.url}`);
+    this.log(`Errors encountered: ${errors.join("; ")}`);
+    
     const fallback = this._generateFallbackDashboardHtml();
     _cachedDashboardHtml = fallback;
     return fallback;
