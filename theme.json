@@ -2,9 +2,9 @@
   "id": "zentabs-manager",
   "name": "ZenTabs Manager",
   "description": "Advanced tab management with auto-sync to bookmarks, memory optimization, and intelligent cleanup",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "homepage": "https://github.com/Tekka90/ZenTabsManager",
-  "updatedAt": "2026-06-25T20:35:00",
+  "updatedAt": "2026-06-26T00:00:00",
   "scripts": {
     "engine/zen.sys.mjs": {}
   },
