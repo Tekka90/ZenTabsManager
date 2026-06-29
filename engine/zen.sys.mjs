@@ -178,7 +178,26 @@ class ZenTabsManager {
       this.dispatchEvent("tab-updated", { tab: e.target }));
   }
 
+  stopBackgroundTasks() {
+    this.window?.clearInterval(this.cleanupInterval);
+    this.window?.clearInterval(this.memoryInterval);
+    this.window?.clearInterval(this.autoUnloadInterval);
+    this.window?.clearInterval(this.publishInterval);
+    this.cleanupInterval = null;
+    this.memoryInterval = null;
+    this.autoUnloadInterval = null;
+    this.publishInterval = null;
+  }
+
   startBackgroundTasks() {
+    // Always reset before starting to avoid duplicate intervals.
+    this.stopBackgroundTasks();
+
+    // Paused state is authoritative: no background jobs should run.
+    if (this.preferences.paused) {
+      return;
+    }
+
     const {
       cleanupEnabled,
       memoryOptimization,
@@ -188,19 +207,25 @@ class ZenTabsManager {
     } = this.preferences;
     
     if (cleanupEnabled) {
-      this.cleanupInterval = this.window.setInterval(() => 
-        this.cleanupManager.runCleanup(), 3600 * 1000);
+      this.cleanupInterval = this.window.setInterval(() => {
+        if (this.preferences.paused) return;
+        this.cleanupManager.runCleanup();
+      }, 3600 * 1000);
     }
     
     if (memoryOptimization) {
-      this.memoryInterval = this.window.setInterval(() => 
-        this.cleanupManager.checkMemoryUsage(), 300 * 1000);
+      this.memoryInterval = this.window.setInterval(() => {
+        if (this.preferences.paused) return;
+        this.cleanupManager.checkMemoryUsage();
+      }, 300 * 1000);
     }
 
     if (autoUnloadEnabled) {
       // Check every minute; actual threshold is compared inside
-      this.autoUnloadInterval = this.window.setInterval(() =>
-        this.cleanupManager.unloadStaleTabs(), 60 * 1000);
+      this.autoUnloadInterval = this.window.setInterval(() => {
+        if (this.preferences.paused) return;
+        this.cleanupManager.unloadStaleTabs();
+      }, 60 * 1000);
     }
 
     if (publishAutoEnabled && this.tabPublishManager) {
@@ -208,6 +233,7 @@ class ZenTabsManager {
         ? Number(publishAutoIntervalMinutes)
         : 30;
       this.publishInterval = this.window.setInterval(async () => {
+        if (this.preferences.paused) return;
         try {
           const result = await this.tabPublishManager.publishTabsToSftp({ skipIfUnchanged: true });
           if (!result.success) {
@@ -276,15 +302,7 @@ class ZenTabsManager {
       console.error("[ZenTabs] Error saving preferences:", error);
     }
 
-    if (this.initialized && !this.preferences.paused) {
-      this.window?.clearInterval(this.cleanupInterval);
-      this.window?.clearInterval(this.memoryInterval);
-      this.window?.clearInterval(this.autoUnloadInterval);
-      this.window?.clearInterval(this.publishInterval);
-      this.cleanupInterval = null;
-      this.memoryInterval = null;
-      this.autoUnloadInterval = null;
-      this.publishInterval = null;
+    if (this.initialized) {
       this.startBackgroundTasks();
     }
     
@@ -293,14 +311,7 @@ class ZenTabsManager {
 
   pause() {
     this.preferences.paused = true;
-    this.window?.clearInterval(this.cleanupInterval);
-    this.window?.clearInterval(this.memoryInterval);
-    this.window?.clearInterval(this.autoUnloadInterval);
-    this.window?.clearInterval(this.publishInterval);
-    this.cleanupInterval = null;
-    this.memoryInterval = null;
-    this.autoUnloadInterval = null;
-    this.publishInterval = null;
+    this.stopBackgroundTasks();
     this.dispatchEvent("paused", {});
     this.log("ZenTabs paused");
   }
@@ -326,10 +337,7 @@ class ZenTabsManager {
   }
 
   async shutdown() {
-    this.window?.clearInterval(this.cleanupInterval);
-    this.window?.clearInterval(this.memoryInterval);
-    this.window?.clearInterval(this.autoUnloadInterval);
-    this.window?.clearInterval(this.publishInterval);
+    this.stopBackgroundTasks();
     
     await this.uiManager?.shutdown();
     await this.cleanupManager?.shutdown();

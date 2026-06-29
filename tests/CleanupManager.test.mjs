@@ -162,6 +162,16 @@ describe("runCleanup", () => {
     assert.equal(r.closed, 0);
     assert.equal(mgr.window.gBrowser._removed.length, 0);
   });
+
+  test("does nothing when paused=true", async () => {
+    const old = makeTab({ url: "https://old.com", lastAccessed: Date.now() - 10 * DAY_MS });
+    const { cm, mgr } = makeCleanup([old], { cleanupEnabled: true, paused: true });
+
+    const r = await cm.runCleanup();
+
+    assert.equal(r, undefined);
+    assert.equal(mgr.window.gBrowser._removed.length, 0);
+  });
 });
 
 // ── Domain exclusion ──────────────────────────────────────────────────────
@@ -496,6 +506,34 @@ describe("optimizeMemory", () => {
     assert.equal(mgr.window.gBrowser._discarded.length, 0);
     assert.deepEqual(r.tabs.map(t => t.title), ["old", "newer"]);
   });
+
+  test("manual optimizeMemory still runs while paused", async () => {
+    const old = makeTab({ url: "https://old.com", lastAccessed: Date.now() - 5 * DAY_MS });
+    const mgr = makeManager({ tabs: [old], preferences: { paused: true, memoryThreshold: 1 } });
+    mgr.window.gBrowser.discardBrowser = (tab) => {
+      tab.setAttribute("discarded", "");
+      mgr.window.gBrowser._discarded.push(tab);
+    };
+    mgr.tabManager = {
+      getAllTabs: async () => [
+        {
+          tab: old,
+          title: "old",
+          url: "https://old.com",
+          type: "normal",
+          state: ["loaded"],
+          lastAccessedAge: { milliseconds: 5 * DAY_MS, days: 5 }
+        }
+      ]
+    };
+    const cm = new CleanupManager(mgr);
+    cm.getMemoryInfo = async () => ({ used: 9, total: 10, limit: 10, percentUsed: 90 });
+
+    const r = await cm.optimizeMemory({ force: true, dryRun: false });
+
+    assert.equal(r.unloaded, 1);
+    assert.equal(mgr.window.gBrowser._discarded.length, 1);
+  });
 });
 
 // ── checkMemoryUsage ──────────────────────────────────────────────────────
@@ -535,5 +573,34 @@ describe("checkMemoryUsage", () => {
 
     await cm.checkMemoryUsage();
     assert.ok(!optimizeCalled);
+  });
+
+  test("does nothing when paused=true", async () => {
+    const mgr = makeManager({ preferences: { paused: true, memoryOptimization: true, memoryThreshold: 80 } });
+    mgr.tabManager = { getAllTabs: async () => [] };
+    const cm = new CleanupManager(mgr);
+    cm.getMemoryInfo = async () => ({ used: 9, total: 10, limit: 10, percentUsed: 90 });
+
+    let optimizeCalled = false;
+    cm.optimizeMemory = async () => { optimizeCalled = true; };
+
+    const r = await cm.checkMemoryUsage();
+
+    assert.equal(r, undefined);
+    assert.equal(optimizeCalled, false);
+  });
+});
+
+describe("onTabsChanged", () => {
+  test("does not trigger checkMemoryUsage when paused", () => {
+    const tabs = Array.from({ length: 101 }, (_, i) => makeTab({ url: `https://tab${i}.com` }));
+    const { cm } = makeCleanup(tabs, { paused: true, memoryOptimization: true });
+
+    let checkCalled = false;
+    cm.checkMemoryUsage = () => { checkCalled = true; };
+
+    cm.onTabsChanged();
+
+    assert.equal(checkCalled, false);
   });
 });

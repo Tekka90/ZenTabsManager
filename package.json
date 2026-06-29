@@ -2,6 +2,6 @@
   "name": "zentabs-manager",
   "type": "module",
   "scripts": {
-    "test": "node --test tests/TabManager.test.mjs tests/CleanupManager.test.mjs tests/SimpleBookmarkSyncManager.test.mjs tests/ResultFormatter.test.mjs tests/TabPublishManager.test.mjs"
+    "test": "node --test tests/TabManager.test.mjs tests/CleanupManager.test.mjs tests/SimpleBookmarkSyncManager.test.mjs tests/ResultFormatter.test.mjs tests/TabPublishManager.test.mjs tests/ZenSysBackgroundTasks.test.mjs"
   }
 }

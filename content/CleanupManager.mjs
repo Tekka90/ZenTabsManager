@@ -33,6 +33,10 @@ export class CleanupManager {
    * Run scheduled cleanup
    */
   async runCleanup() {
+    if (this.manager.preferences.paused) {
+      return;
+    }
+
     if (!this.manager.preferences.cleanupEnabled) {
       return;
     }
@@ -186,6 +190,10 @@ export class CleanupManager {
    * Check memory usage and unload tabs if needed
    */
   async checkMemoryUsage() {
+    if (this.manager.preferences.paused) {
+      return;
+    }
+
     if (!this.manager.preferences.memoryOptimization) {
       return;
     }
@@ -400,6 +408,10 @@ export class CleanupManager {
    * Event handlers
    */
   onTabsChanged() {
+    if (this.manager.preferences.paused) {
+      return;
+    }
+
     // Could trigger memory check if tab count is high
     const tabs = this.manager.window.gBrowser.tabs;
     if (tabs.length > 100 && this.manager.preferences.memoryOptimization) {
