@@ -502,11 +502,12 @@ export class UIManager {
 
       const result = await this.manager.tabPublishManager.publishTabsToSftp();
       if (result.success) {
+        const statusValue = result.skipped ? "No changes (skipped)" : "Yes";
         this.openResultsWindow({
           title: "ZenTabs - Publish Tabs Dashboard",
           timestamp: result.exportedAt,
           summary: [
-            { label: "Success", value: "Yes" },
+            { label: "Success", value: statusValue },
             { label: "Tabs", value: result.generated.tabCount },
             { label: "JSON", value: result.generated.jsonFileName },
             { label: "HTML", value: result.generated.htmlFileName },
@@ -520,7 +521,11 @@ export class UIManager {
             },
           ],
         });
-        this.showNotification("Publish Complete", `Uploaded ${result.generated.tabCount} tabs`);
+        if (result.skipped) {
+          this.showNotification("Publish Complete", result.reason || "No changes to publish");
+        } else {
+          this.showNotification("Publish Complete", `Uploaded ${result.generated.tabCount} tabs`);
+        }
       } else {
         const message = (result.errors ?? []).join("; ") || "Unknown error";
         this.openResultsWindow(buildErrorResult("ZenTabs - Publish Tabs Dashboard", message));
@@ -609,6 +614,14 @@ export class UIManager {
       {
         key: "publishSftpDashboardTitle", label: "Dashboard page title", type: "text",
         tooltip: "Title displayed in the generated web dashboard."
+      },
+      {
+        key: "publishAutoEnabled", label: "Enable automatic dashboard publish", type: "checkbox",
+        tooltip: "Runs the publish extract in the background on a fixed interval."
+      },
+      {
+        key: "publishAutoIntervalMinutes", label: "Auto publish interval (minutes)", type: "number",
+        tooltip: "How often automatic dashboard publish runs. Default is 30 minutes."
       },
     ];
 

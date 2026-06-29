@@ -206,6 +206,8 @@ Stored under `Services.prefs.getBranch("zentabs.")` as a JSON string in `"prefer
 | `publishSftpRemoteDir` | `""` | Remote directory where `tabs.json` and `index.html` are uploaded |
 | `publishSftpPrivateKeyPath` | `""` | Optional SSH private key path for SFTP authentication |
 | `publishSftpDashboardTitle` | `"ZenTabs Dashboard"` | Page title used in generated dashboard HTML |
+| `publishAutoEnabled` | `true` | Enable automatic background publish of dashboard files to SFTP |
+| `publishAutoIntervalMinutes` | `30` | Interval in minutes for automatic dashboard publish |
 
 ## Coding Conventions
 
@@ -292,6 +294,7 @@ All approved feature specs live in the `specs/` directory. Consult the relevant 
 | `specs/KagiDashboardIntegrations.spec.md` | Dashboard Kagi Research/Assistant launchers + Kagi News highlights | Implemented — 2026-06-25 |
 | `specs/ManualCleanupOptimizerConfirm.spec.md` | Manual cleanup/optimizer preview with OK/Cancel confirmation before execution | Implemented — 2026-06-25 |
 | `specs/OpenTabsSectionInPublishDashboard.spec.md` | Published dashboard end-section listing open normal tabs across spaces | Implemented — 2026-06-26 |
+| `specs/AutoPublishTabsDashboard.spec.md` | Scheduled publish every 30 minutes with unchanged-content skip | Implemented — 2026-06-27 |
 
 ---
 

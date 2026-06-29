@@ -8,6 +8,7 @@ let _cachedDashboardHtml = null;
 export class TabPublishManager {
   constructor(manager) {
     this.manager = manager;
+    this.lastPublishedFingerprint = null;
   }
 
   log(...args) {
@@ -136,6 +137,18 @@ export class TabPublishManager {
     return args;
   }
 
+  buildPayloadFingerprint(payload, html) {
+    const {
+      generatedAt,
+      ...stablePayload
+    } = payload;
+
+    return JSON.stringify({
+      payload: stablePayload,
+      html,
+    });
+  }
+
   async _runSftp(args) {
     if (typeof this.manager.window?.ZenTabsProcessRunner === "function") {
       return this.manager.window.ZenTabsProcessRunner("/usr/bin/sftp", args);
@@ -171,10 +184,13 @@ export class TabPublishManager {
       privateKeyPath: options.privateKeyPath ?? prefs.publishSftpPrivateKeyPath,
       dashboardTitle: options.dashboardTitle ?? prefs.publishSftpDashboardTitle ?? "ZenTabs Dashboard",
     };
+    const skipIfUnchanged = options.skipIfUnchanged !== false;
+    const forceUpload = options.forceUpload === true;
 
     if (!cfg.host || !cfg.user || !cfg.remoteDir) {
       return {
         success: false,
+        skipped: false,
         exportedAt: new Date().toISOString(),
         generated: { jsonFileName: "tabs.json", htmlFileName: "index.html", tabCount: 0 },
         uploaded: { json: false, html: false },
@@ -187,6 +203,7 @@ export class TabPublishManager {
     if (!IOUtils || !PathUtils) {
       return {
         success: false,
+        skipped: false,
         exportedAt: new Date().toISOString(),
         generated: { jsonFileName: "tabs.json", htmlFileName: "index.html", tabCount: 0 },
         uploaded: { json: false, html: false },
@@ -198,6 +215,23 @@ export class TabPublishManager {
       const tabs = await this.manager.tabManager.getAllTabs();
       const payload = this.buildTabsPayload(tabs);
       const html = await this._readDashboardHtml();
+      const fingerprint = this.buildPayloadFingerprint(payload, html);
+
+      if (!forceUpload && skipIfUnchanged && this.lastPublishedFingerprint === fingerprint) {
+        return {
+          success: true,
+          skipped: true,
+          reason: "No changes detected in dashboard payload",
+          exportedAt: payload.generatedAt,
+          generated: {
+            jsonFileName: "tabs.json",
+            htmlFileName: "index.html",
+            tabCount: payload.tabs.length,
+          },
+          uploaded: { json: false, html: false },
+          errors,
+        };
+      }
 
       const baseDir = PathUtils.join(PathUtils.profileDir, "zentabs-publish");
       await IOUtils.makeDirectory(baseDir);
@@ -212,9 +246,11 @@ export class TabPublishManager {
 
       const args = this.buildSftpArgs(cfg, batchPath);
       await this._runSftp(args);
+      this.lastPublishedFingerprint = fingerprint;
 
       return {
         success: true,
+        skipped: false,
         exportedAt: payload.generatedAt,
         generated: {
           jsonFileName: "tabs.json",
@@ -228,6 +264,7 @@ export class TabPublishManager {
       errors.push(String(e?.message || e));
       return {
         success: false,
+        skipped: false,
         exportedAt: new Date().toISOString(),
         generated: {
           jsonFileName: "tabs.json",

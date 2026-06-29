@@ -216,6 +216,136 @@ describe("TabPublishManager", () => {
     assert.ok([...ioStore.keys()].some(k => k.endsWith("/upload.sftp")));
   });
 
+  test("publishTabsToSftp skips write/upload when payload is unchanged", async () => {
+    const tabs = [
+      {
+        title: "App",
+        url: "https://app.local",
+        type: "pinned",
+        workspace: { name: "Work" },
+        folderPath: ["Tools"],
+        container: 1,
+        lastAccessed: 1000,
+      },
+    ];
+
+    const { mgr, pub } = makePublishManager({
+      tabs,
+      preferences: {
+        publishSftpHost: "example.com",
+        publishSftpUser: "alice",
+        publishSftpRemoteDir: "/remote/site/tabs",
+      },
+    });
+
+    let runCount = 0;
+    mgr.window.ZenTabsProcessRunner = async () => {
+      runCount += 1;
+      return { code: 0 };
+    };
+
+    const ioUtils = globalThis.IOUtils;
+    const originalWrite = ioUtils.writeUTF8;
+    let writeCount = 0;
+    ioUtils.writeUTF8 = async (path, content) => {
+      writeCount += 1;
+      return originalWrite.call(ioUtils, path, content);
+    };
+
+    try {
+      const dashboardFilePath = fileURLToPath(new URL("../content/dashboard.html", import.meta.url));
+      ioUtils._store.set(dashboardFilePath, DASHBOARD_HTML);
+
+      const first = await pub.publishTabsToSftp();
+      const writesAfterFirst = writeCount;
+      const second = await pub.publishTabsToSftp();
+
+      assert.equal(first.success, true);
+      assert.equal(first.skipped, false);
+      assert.equal(second.success, true);
+      assert.equal(second.skipped, true);
+      assert.match(second.reason, /No changes detected/);
+      assert.equal(runCount, 1, "second run should not invoke sftp");
+      assert.equal(writeCount, writesAfterFirst, "second run should not rewrite files");
+    } finally {
+      ioUtils.writeUTF8 = originalWrite;
+    }
+  });
+
+  test("publishTabsToSftp writes and uploads again when payload changes", async () => {
+    let currentTabs = [
+      {
+        title: "App",
+        url: "https://app.local",
+        type: "pinned",
+        workspace: { name: "Work" },
+        folderPath: ["Tools"],
+        container: 1,
+        lastAccessed: 1000,
+      },
+    ];
+
+    const { mgr, pub } = makePublishManager({
+      tabs: currentTabs,
+      preferences: {
+        publishSftpHost: "example.com",
+        publishSftpUser: "alice",
+        publishSftpRemoteDir: "/remote/site/tabs",
+      },
+    });
+
+    mgr.tabManager = {
+      async getAllTabs() {
+        return currentTabs;
+      },
+    };
+
+    let runCount = 0;
+    mgr.window.ZenTabsProcessRunner = async () => {
+      runCount += 1;
+      return { code: 0 };
+    };
+
+    const ioUtils = globalThis.IOUtils;
+    const originalWrite = ioUtils.writeUTF8;
+    let writeCount = 0;
+    ioUtils.writeUTF8 = async (path, content) => {
+      writeCount += 1;
+      return originalWrite.call(ioUtils, path, content);
+    };
+
+    try {
+      const dashboardFilePath = fileURLToPath(new URL("../content/dashboard.html", import.meta.url));
+      ioUtils._store.set(dashboardFilePath, DASHBOARD_HTML);
+
+      const first = await pub.publishTabsToSftp();
+      const writesAfterFirst = writeCount;
+
+      currentTabs = [
+        ...currentTabs,
+        {
+          title: "Docs",
+          url: "https://docs.local",
+          type: "normal",
+          workspace: { name: "Work" },
+          folderPath: null,
+          container: null,
+          lastAccessed: 2000,
+        },
+      ];
+
+      const second = await pub.publishTabsToSftp();
+
+      assert.equal(first.success, true);
+      assert.equal(second.success, true);
+      assert.equal(second.skipped, false);
+      assert.equal(runCount, 2, "changed payload should trigger a second upload");
+      assert.ok(writeCount > writesAfterFirst, "changed payload should rewrite files");
+    } finally {
+      ioUtils.writeUTF8 = originalWrite;
+    }
+  });
+
   test("publishTabsToSftp returns structured error when runner fails", async () => {
     const { mgr, pub } = makePublishManager({
       tabs: [],

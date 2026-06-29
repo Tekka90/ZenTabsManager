@@ -19,6 +19,10 @@ class ZenTabsManager {
     this.tabPublishManager = null;
     this.uiManager = null;
     this.events = new EventTarget();
+    this.cleanupInterval = null;
+    this.memoryInterval = null;
+    this.autoUnloadInterval = null;
+    this.publishInterval = null;
     
     console.log("[ZenTabs] Manager created");
   }
@@ -175,7 +179,13 @@ class ZenTabsManager {
   }
 
   startBackgroundTasks() {
-    const { cleanupEnabled, memoryOptimization, autoUnloadEnabled } = this.preferences;
+    const {
+      cleanupEnabled,
+      memoryOptimization,
+      autoUnloadEnabled,
+      publishAutoEnabled,
+      publishAutoIntervalMinutes,
+    } = this.preferences;
     
     if (cleanupEnabled) {
       this.cleanupInterval = this.window.setInterval(() => 
@@ -191,6 +201,22 @@ class ZenTabsManager {
       // Check every minute; actual threshold is compared inside
       this.autoUnloadInterval = this.window.setInterval(() =>
         this.cleanupManager.unloadStaleTabs(), 60 * 1000);
+    }
+
+    if (publishAutoEnabled && this.tabPublishManager) {
+      const intervalMinutes = Number(publishAutoIntervalMinutes) > 0
+        ? Number(publishAutoIntervalMinutes)
+        : 30;
+      this.publishInterval = this.window.setInterval(async () => {
+        try {
+          const result = await this.tabPublishManager.publishTabsToSftp({ skipIfUnchanged: true });
+          if (!result.success) {
+            this.log("Auto-publish failed:", (result.errors || []).join("; ") || "Unknown error");
+          }
+        } catch (error) {
+          this.log("Auto-publish error:", String(error));
+        }
+      }, intervalMinutes * 60 * 1000);
     }
   }
 
@@ -215,7 +241,9 @@ class ZenTabsManager {
       publishSftpUser: "",
       publishSftpRemoteDir: "",
       publishSftpPrivateKeyPath: "",
-      publishSftpDashboardTitle: "ZenTabs Dashboard"
+      publishSftpDashboardTitle: "ZenTabs Dashboard",
+      publishAutoEnabled: true,
+      publishAutoIntervalMinutes: 30,
     };
 
     try {
@@ -247,6 +275,18 @@ class ZenTabsManager {
     } catch (error) {
       console.error("[ZenTabs] Error saving preferences:", error);
     }
+
+    if (this.initialized && !this.preferences.paused) {
+      this.window?.clearInterval(this.cleanupInterval);
+      this.window?.clearInterval(this.memoryInterval);
+      this.window?.clearInterval(this.autoUnloadInterval);
+      this.window?.clearInterval(this.publishInterval);
+      this.cleanupInterval = null;
+      this.memoryInterval = null;
+      this.autoUnloadInterval = null;
+      this.publishInterval = null;
+      this.startBackgroundTasks();
+    }
     
     this.dispatchEvent("preferences-changed", { preferences: this.preferences });
   }
@@ -255,8 +295,12 @@ class ZenTabsManager {
     this.preferences.paused = true;
     this.window?.clearInterval(this.cleanupInterval);
     this.window?.clearInterval(this.memoryInterval);
+    this.window?.clearInterval(this.autoUnloadInterval);
+    this.window?.clearInterval(this.publishInterval);
     this.cleanupInterval = null;
     this.memoryInterval = null;
+    this.autoUnloadInterval = null;
+    this.publishInterval = null;
     this.dispatchEvent("paused", {});
     this.log("ZenTabs paused");
   }
@@ -284,9 +328,12 @@ class ZenTabsManager {
   async shutdown() {
     this.window?.clearInterval(this.cleanupInterval);
     this.window?.clearInterval(this.memoryInterval);
+    this.window?.clearInterval(this.autoUnloadInterval);
+    this.window?.clearInterval(this.publishInterval);
     
     await this.uiManager?.shutdown();
     await this.cleanupManager?.shutdown();
+    await this.tabPublishManager?.shutdown?.();
     await this.tabManager?.shutdown();
     
     this.initialized = false;
